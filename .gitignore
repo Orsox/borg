@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# BorgOS specific
+borgos.db
+frontend/.svelte-kit/
+frontend/node_modules/
+frontend/build/
+frontend/dist/
+.archon/workspaces/

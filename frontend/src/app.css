@@ -1,0 +1,109 @@
+@import 'tailwindcss';
+
+:root {
+	/* Borg Color Palette */
+	--borg-black: #080b0d;
+	--borg-void: #0d1117;
+	--borg-panel: #111820;
+	--borg-grid: #161f2a;
+	--borg-border: #1e3040;
+	--borg-border-active: #2a5068;
+	--borg-cyan: #00e5ff;
+	--borg-cyan-dim: #00b4cc;
+	--borg-green: #39ff14;
+	--borg-green-dim: #2acc10;
+	--borg-amber: #ffaa00;
+	--borg-red: #ff2244;
+	--borg-text-primary: #c8e6f0;
+	--borg-text-secondary: #6a9ab0;
+	--borg-text-disabled: #2a4a5e;
+
+	/* Glow effects */
+	--glow-cyan: 0 0 8px #00e5ff44, 0 0 20px #00e5ff22, 0 0 40px #00e5ff11;
+	--glow-green: 0 0 8px #39ff1444, 0 0 20px #39ff1422;
+	--glow-red: 0 0 8px #ff224444, 0 0 20px #ff224422;
+}
+
+*, *::before, *::after {
+	box-sizing: border-box;
+}
+
+html, body {
+	margin: 0;
+	padding: 0;
+	background-color: var(--borg-black);
+	color: var(--borg-text-primary);
+	font-family: 'JetBrains Mono', 'Courier New', monospace;
+	font-size: 14px;
+	line-height: 1.5;
+	min-height: 100vh;
+}
+
+h1, h2, h3, h4, h5, h6 {
+	font-family: 'Share Tech Mono', 'Courier New', monospace;
+	color: var(--borg-text-primary);
+}
+
+a {
+	color: var(--borg-cyan);
+	text-decoration: none;
+}
+
+a:hover {
+	color: var(--borg-cyan-dim);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+	width: 6px;
+	height: 6px;
+}
+
+::-webkit-scrollbar-track {
+	background: var(--borg-void);
+}
+
+::-webkit-scrollbar-thumb {
+	background: var(--borg-border);
+	border-radius: 0;
+}
+
+::-webkit-scrollbar-thumb:hover {
+	background: var(--borg-border-active);
+}
+
+/* Focus ring */
+:focus-visible {
+	outline: 1px solid var(--borg-cyan);
+	outline-offset: 2px;
+}
+
+/* Scan-line animation for module headers */
+@keyframes scanline {
+	0% { transform: translateY(-100%); opacity: 0; }
+	10% { opacity: 0.03; }
+	90% { opacity: 0.03; }
+	100% { transform: translateY(100vh); opacity: 0; }
+}
+
+.scanline::after {
+	content: '';
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 100%;
+	height: 1px;
+	background: var(--borg-cyan);
+	animation: scanline 4s linear infinite;
+	pointer-events: none;
+}
+
+/* Text flicker for live values */
+@keyframes flicker {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.7; }
+}
+
+.flicker {
+	animation: flicker 1s ease-in-out 1;
+}
