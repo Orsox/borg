@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { login } from '$lib/api/client';
 	import { authStore, isAuthenticated } from '$lib/stores/auth';
@@ -11,6 +12,27 @@
 	let errorMsg = $state('');
 	let loading = $state(false);
 
+	// Browser Credential Management API — auto-fill stored credentials
+	onMount(async () => {
+		if ('credentials' in navigator) {
+			try {
+				// @ts-ignore — PasswordCredential not in default TS lib
+				const cred = await navigator.credentials.get({
+					password: true,
+					mediation: 'optional'
+				} as any);
+				// @ts-ignore
+				if (cred && cred.id) {
+					username = cred.id;
+					// @ts-ignore
+					password = cred.password ?? '';
+				}
+			} catch {
+				// CM API not available — no-op
+			}
+		}
+	});
+
 	async function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
 		if (loading) return;
@@ -22,6 +44,22 @@
 			authStore.setToken(result.access_token);
 			const user = await getMe();
 			authStore.setUser(user);
+
+			// Store credential for browser password manager (Chrome/Edge/Firefox)
+			if ('credentials' in navigator) {
+				try {
+					// @ts-ignore — PasswordCredential not in default TS lib
+					const PasswordCred = window.PasswordCredential;
+					if (PasswordCred) {
+						// @ts-ignore
+						const cred = new PasswordCred({ id: username, password });
+						await navigator.credentials.store(cred);
+					}
+				} catch {
+					// Silently ignore — CM API is optional enhancement
+				}
+			}
+
 			await goto('/');
 		} catch (err: unknown) {
 			errorMsg = err instanceof Error ? err.message : 'Login failed';
@@ -60,6 +98,8 @@
 					type="text"
 					bind:value={username}
 					placeholder="borg"
+					autocomplete="username"
+					autofocus
 					disabled={loading}
 				/>
 			</div>
@@ -72,6 +112,7 @@
 					type="password"
 					bind:value={password}
 					placeholder="••••••••"
+					autocomplete="current-password"
 					disabled={loading}
 				/>
 			</div>

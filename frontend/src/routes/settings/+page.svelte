@@ -3,9 +3,11 @@
 	import BorgPanel from '$lib/components/BorgPanel.svelte';
 	import BorgButton from '$lib/components/BorgButton.svelte';
 	import BorgInput from '$lib/components/BorgInput.svelte';
-	import { getHealth } from '$lib/api/client';
+	import { getHealth, getMe } from '$lib/api/client';
+	import { authStore, currentUser } from '$lib/stores/auth';
 	import { listNotes } from '$lib/api/brain';
 	import { listTasks } from '$lib/api/tasks';
+	import { changeMyPassword, updateMyUsername } from '$lib/api/users';
 
 	interface HealthData {
 		status: string;
@@ -16,8 +18,20 @@
 	let health: HealthData | null = $state(null);
 	let noteCount = $state(0);
 	let taskCount = $state(0);
-	let archonAssetCount = $state(0);
 	let loading = $state(true);
+
+	// Account management state
+	let newUsername = $state('');
+	let savingUsername = $state(false);
+	let usernameError = $state('');
+	let usernameSuccess = $state(false);
+
+	let currentPassword = $state('');
+	let newPassword = $state('');
+	let confirmPassword = $state('');
+	let savingPassword = $state(false);
+	let passwordError = $state('');
+	let passwordSuccess = $state(false);
 
 	async function loadData() {
 		try {
@@ -41,6 +55,64 @@
 		if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 		if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 		return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`;
+	}
+
+	async function handleUsernameChange(e: SubmitEvent) {
+		e.preventDefault();
+		savingUsername = true;
+		usernameError = '';
+		usernameSuccess = false;
+		try {
+			await updateMyUsername(newUsername);
+			const user = await getMe();
+			authStore.setUser(user);
+			newUsername = '';
+			usernameSuccess = true;
+			setTimeout(() => { usernameSuccess = false; }, 3000);
+		} catch (err) {
+			usernameError = err instanceof Error ? err.message : 'Failed to update';
+		} finally {
+			savingUsername = false;
+		}
+	}
+
+	async function handlePasswordChange(e: SubmitEvent) {
+		e.preventDefault();
+		if (newPassword !== confirmPassword) {
+			passwordError = 'New passwords do not match';
+			return;
+		}
+		savingPassword = true;
+		passwordError = '';
+		passwordSuccess = false;
+		try {
+			await changeMyPassword(currentPassword, newPassword);
+			currentPassword = '';
+			newPassword = '';
+			confirmPassword = '';
+			passwordSuccess = true;
+			setTimeout(() => { passwordSuccess = false; }, 3000);
+
+			// Prompt browser to update stored credential
+			if ('credentials' in navigator) {
+				try {
+					// @ts-ignore — PasswordCredential not in default TS lib
+					const PasswordCred = window.PasswordCredential;
+					if (PasswordCred) {
+						// @ts-ignore
+						const cred = new PasswordCred({
+							id: $currentUser?.username ?? '',
+							password: newPassword,
+						});
+						await navigator.credentials.store(cred);
+					}
+				} catch { /* optional */ }
+			}
+		} catch (err) {
+			passwordError = err instanceof Error ? err.message : 'Failed to update';
+		} finally {
+			savingPassword = false;
+		}
 	}
 
 	onMount(loadData);
@@ -95,6 +167,77 @@
 				<span class="status-label">VERSION</span>
 				<span class="status-value">0.1.0</span>
 			</div>
+		</BorgPanel>
+
+		<!-- Change Identity -->
+		<BorgPanel class="settings-panel">
+			<h2 class="panel-title">CHANGE IDENTITY</h2>
+			<form onsubmit={handleUsernameChange} class="account-form" novalidate>
+				<div class="form-field">
+					<label class="form-label">New Identity</label>
+					<BorgInput
+						bind:value={newUsername}
+						placeholder="new-username"
+						autocomplete="username"
+						disabled={savingUsername}
+					/>
+				</div>
+				{#if usernameError}
+					<div class="form-error" role="alert">⚠ {usernameError}</div>
+				{/if}
+				{#if usernameSuccess}
+					<div class="form-success" role="status">✓ Identity updated.</div>
+				{/if}
+				<BorgButton type="submit" variant="primary" disabled={savingUsername || !newUsername}>
+					{savingUsername ? 'UPDATING...' : 'UPDATE IDENTITY'}
+				</BorgButton>
+			</form>
+		</BorgPanel>
+
+		<!-- Change Access Code -->
+		<BorgPanel class="settings-panel">
+			<h2 class="panel-title">CHANGE ACCESS CODE</h2>
+			<form onsubmit={handlePasswordChange} class="account-form" novalidate>
+				<div class="form-field">
+					<label class="form-label">Current Code</label>
+					<BorgInput
+						type="password"
+						bind:value={currentPassword}
+						placeholder="••••••••"
+						autocomplete="current-password"
+						disabled={savingPassword}
+					/>
+				</div>
+				<div class="form-field">
+					<label class="form-label">New Code</label>
+					<BorgInput
+						type="password"
+						bind:value={newPassword}
+						placeholder="••••••••"
+						autocomplete="new-password"
+						disabled={savingPassword}
+					/>
+				</div>
+				<div class="form-field">
+					<label class="form-label">Confirm New Code</label>
+					<BorgInput
+						type="password"
+						bind:value={confirmPassword}
+						placeholder="••••••••"
+						autocomplete="new-password"
+						disabled={savingPassword}
+					/>
+				</div>
+				{#if passwordError}
+					<div class="form-error" role="alert">⚠ {passwordError}</div>
+				{/if}
+				{#if passwordSuccess}
+					<div class="form-success" role="status">✓ Access code updated.</div>
+				{/if}
+				<BorgButton type="submit" variant="primary" disabled={savingPassword || !currentPassword || !newPassword}>
+					{savingPassword ? 'UPDATING...' : 'UPDATE CODE'}
+				</BorgButton>
+			</form>
 		</BorgPanel>
 
 		<!-- Keyboard Shortcuts -->
@@ -260,5 +403,27 @@
 
 	.api-link:hover {
 		text-decoration: underline;
+	}
+
+	.account-form {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.form-error {
+		color: var(--borg-red);
+		font-size: 12px;
+		padding: 6px 10px;
+		border: 1px solid var(--borg-red);
+		background-color: rgba(255, 34, 68, 0.08);
+	}
+
+	.form-success {
+		color: var(--borg-green);
+		font-size: 12px;
+		padding: 6px 10px;
+		border: 1px solid var(--borg-green);
+		background-color: rgba(57, 255, 20, 0.08);
 	}
 </style>

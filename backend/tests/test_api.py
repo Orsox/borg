@@ -103,6 +103,125 @@ async def test_note_crud():
 
 
 @pytest.mark.asyncio
+async def test_user_create_and_list():
+    """Test admin can create and list users."""
+    from app.main import app
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        login = await client.post(
+            "/api/auth/token",
+            data={"username": "borg", "password": "borgborg"},
+        )
+        token = login.json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # Create user
+        response = await client.post(
+            "/api/users",
+            json={"username": "testuser", "password": "testpass99"},
+            headers=headers,
+        )
+        assert response.status_code == 201
+        user = response.json()
+        assert user["username"] == "testuser"
+        assert user["is_admin"] is False
+
+        # List users
+        response = await client.get("/api/users", headers=headers)
+        assert response.status_code == 200
+        assert response.json()["total"] >= 2
+
+
+@pytest.mark.asyncio
+async def test_change_own_password():
+    """Test user can change their own password."""
+    from app.main import app
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        login = await client.post(
+            "/api/auth/token",
+            data={"username": "borg", "password": "borgborg"},
+        )
+        token = login.json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        response = await client.post(
+            "/api/auth/me/change-password",
+            json={"current_password": "borgborg", "new_password": "newpassword1"},
+            headers=headers,
+        )
+        assert response.status_code == 204
+
+        # Revert
+        login2 = await client.post(
+            "/api/auth/token",
+            data={"username": "borg", "password": "newpassword1"},
+        )
+        token2 = login2.json()["access_token"]
+        headers2 = {"Authorization": f"Bearer {token2}"}
+        await client.post(
+            "/api/auth/me/change-password",
+            json={"current_password": "newpassword1", "new_password": "borgborg"},
+            headers=headers2,
+        )
+
+
+@pytest.mark.asyncio
+async def test_non_admin_cannot_create_user():
+    """Test regular users cannot access admin endpoints."""
+    from app.main import app
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Create non-admin user first using admin
+        admin_login = await client.post(
+            "/api/auth/token",
+            data={"username": "borg", "password": "borgborg"},
+        )
+        admin_token = admin_login.json()["access_token"]
+        await client.post(
+            "/api/users",
+            json={"username": "nonadmin", "password": "password99"},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+
+        # Login as non-admin
+        login = await client.post(
+            "/api/auth/token",
+            data={"username": "nonadmin", "password": "password99"},
+        )
+        token = login.json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        response = await client.post(
+            "/api/users",
+            json={"username": "anotheruser", "password": "password99"},
+            headers=headers,
+        )
+        assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_me_returns_is_admin():
+    """Test GET /api/auth/me includes is_admin field."""
+    from app.main import app
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        login = await client.post(
+            "/api/auth/token",
+            data={"username": "borg", "password": "borgborg"},
+        )
+        token = login.json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        response = await client.get("/api/auth/me", headers=headers)
+        assert response.status_code == 200
+        data = response.json()
+        assert "is_admin" in data
+        assert data["is_admin"] is True
+        assert "is_active" in data
+
+
+@pytest.mark.asyncio
 async def test_task_crud():
     """Test task creation, retrieval, and deletion."""
     from app.main import app

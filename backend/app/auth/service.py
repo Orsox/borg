@@ -50,13 +50,91 @@ async def authenticate_user(db: AsyncSession, username: str, password: str) -> O
     return user
 
 
+async def get_user_by_id(db: AsyncSession, user_id: int):
+    result = await db.execute(select(User).where(User.id == user_id))
+    return result.scalar_one_or_none()
+
+
+async def list_users(db: AsyncSession) -> list[User]:
+    result = await db.execute(select(User).order_by(User.created_at))
+    return list(result.scalars().all())
+
+
+async def create_user(
+    db: AsyncSession, username: str, password: str, is_admin: bool = False
+) -> User:
+    existing = await get_user_by_username(db, username)
+    if existing:
+        raise ValueError(f"Username '{username}' already taken")
+    user = User(
+        username=username,
+        hashed_password=hash_password(password),
+        is_admin=is_admin,
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+async def update_username(
+    db: AsyncSession, user_id: int, new_username: str
+):
+    conflict = await get_user_by_username(db, new_username)
+    if conflict and conflict.id != user_id:
+        raise ValueError(f"Username '{new_username}' already taken")
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        return None
+    user.username = new_username
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+async def change_password(
+    db: AsyncSession, user_id: int, current_password: str, new_password: str
+) -> bool:
+    user = await get_user_by_id(db, user_id)
+    if not user or not verify_password(current_password, user.hashed_password):
+        return False
+    user.hashed_password = hash_password(new_password)
+    await db.commit()
+    return True
+
+
+async def admin_set_password(
+    db: AsyncSession, user_id: int, new_password: str
+) -> bool:
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        return False
+    user.hashed_password = hash_password(new_password)
+    await db.commit()
+    return True
+
+
+async def deactivate_user(db: AsyncSession, user_id: int) -> bool:
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        return False
+    user.is_active = False
+    await db.commit()
+    return True
+
+
 async def seed_default_user(db: AsyncSession) -> None:
     existing = await get_user_by_username(db, "borg")
     if existing:
+        # Upgrade path: ensure borg is admin
+        if not existing.is_admin:
+            existing.is_admin = True
+            await db.commit()
         return
     user = User(
         username="borg",
         hashed_password=hash_password(settings.initial_password),
+        is_admin=True,
     )
     db.add(user)
     await db.commit()

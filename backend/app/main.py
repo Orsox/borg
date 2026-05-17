@@ -11,7 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.archon_hub.models import ArchonAsset, CopyHistory  # noqa: F401
 from app.archon_hub.router import router as archon_router
 from app.auth.models import User  # noqa: F401 — ensures model is registered
-from app.auth.router import router as auth_router
+from app.auth.router import router as auth_router, users_router
 from app.second_brain.models import Note, NoteLink  # noqa: F401
 from app.second_brain.router import router as brain_router
 from app.task_automation.models import Task, TaskRun  # noqa: F401
@@ -42,9 +42,20 @@ def _ensure_db_dir() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _ensure_db_dir()
-    # Create all tables
+    # Create all tables + DDL migration for new columns
+    from sqlalchemy import text
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Add is_admin / is_active columns if missing (SQLite migration)
+        for ddl in [
+            "ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT 1",
+        ]:
+            try:
+                await conn.execute(text(ddl))
+            except Exception:
+                pass  # column already exists
 
     # Seed default admin user
     async with AsyncSessionLocal() as db:
@@ -83,6 +94,7 @@ app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, generic_exception_handler)
 
 app.include_router(auth_router)
+app.include_router(users_router)
 app.include_router(archon_router)
 app.include_router(brain_router)
 app.include_router(task_router)

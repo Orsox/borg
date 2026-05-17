@@ -1,0 +1,104 @@
+import { apiFetch } from './client';
+
+// --- Types ---
+export interface Note {
+	id: number;
+	title: string;
+	content: string;
+	tags: string[];
+	is_archived: boolean;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface NoteListItem {
+	id: number;
+	title: string;
+	tags: string[];
+	created_at: string;
+	updated_at: string;
+}
+
+export interface PaginatedNotes {
+	items: NoteListItem[];
+	total: number;
+	page: number;
+	size: number;
+	pages: number;
+}
+
+export interface BacklinkItem {
+	id: number;
+	title: string;
+	updated_at: string;
+}
+
+export interface GraphNode {
+	id: number;
+	title: string;
+	tags: string[];
+}
+
+export interface GraphEdge {
+	source: number;
+	target: number;
+}
+
+export interface KnowledgeGraph {
+	nodes: GraphNode[];
+	edges: GraphEdge[];
+}
+
+// --- API functions ---
+export async function createNote(title: string, content: string = '', tags: string[] = []): Promise<Note> {
+	return apiFetch<Note>('/brain/notes', {
+		method: 'POST',
+		body: JSON.stringify({ title, content, tags }),
+	});
+}
+
+export async function listNotes(
+	page = 1,
+	size = 20,
+	search?: string,
+	tags?: string,
+	archived = false,
+): Promise<PaginatedNotes> {
+	const params = new URLSearchParams({ page: String(page), size: String(size) });
+	if (search) params.set('search', search);
+	if (tags) params.set('tags', tags);
+	if (archived) params.set('archived', 'true');
+	return apiFetch<PaginatedNotes>(`/brain/notes?${params}`);
+}
+
+export async function getNote(id: number): Promise<Note> {
+	return apiFetch<Note>(`/brain/notes/${id}`);
+}
+
+export async function updateNote(
+	id: number,
+	title?: string,
+	content?: string,
+	tags?: string[],
+): Promise<Note> {
+	const body: Record<string, unknown> = {};
+	if (title !== undefined) body.title = title;
+	if (content !== undefined) body.content = content;
+	if (tags !== undefined) body.tags = tags;
+	return apiFetch<Note>(`/brain/notes/${id}`, {
+		method: 'PUT',
+		body: JSON.stringify(body),
+	});
+}
+
+export async function archiveNote(id: number): Promise<Note> {
+	return apiFetch<Note>(`/brain/notes/${id}`, { method: 'DELETE' });
+}
+
+export async function getBacklinks(id: number): Promise<BacklinkItem[]> {
+	return apiFetch<BacklinkItem[]>(`/brain/notes/${id}/backlinks`);
+}
+
+export async function getKnowledgeGraph(): Promise<KnowledgeGraph> {
+	return apiFetch<KnowledgeGraph>('/brain/graph');
+}
