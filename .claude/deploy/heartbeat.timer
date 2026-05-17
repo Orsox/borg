@@ -1,0 +1,13 @@
+[Unit]
+Description=Orsox's Second Brain — Heartbeat every 30 min (work hours)
+# The heartbeat script itself enforces the 07:00–20:00 CET window.
+# Timer fires every 30 min at :00 and :30 throughout the day.
+
+[Timer]
+OnCalendar=*-*-* *:00,30:00
+Persistent=true
+# Small jitter to avoid thundering-herd if multiple services start at once
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

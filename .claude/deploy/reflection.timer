@@ -1,0 +1,9 @@
+[Unit]
+Description=Orsox's Second Brain — Daily Reflection at 08:00 CET
+
+[Timer]
+OnCalendar=*-*-* 08:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

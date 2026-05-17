@@ -1,0 +1,25 @@
+# Second Brain — Python dependencies
+# Install into the shared venv: ~/.claude/venv/bin/pip install -r requirements.txt
+
+# Phase 3: Memory RAG
+fastembed>=0.8.0
+sqlite-vec>=0.1.9
+
+# Phase 4: Integrations (uncomment as you build each)
+# atlassian-python-api>=4.0.0     # Jira
+# python-gitlab>=4.0.0            # GitLab
+# polarion-rest-api-client>=2.0.0 # Polarion
+# msgraph-sdk>=1.0.0              # Teams + OneDrive
+# azure-identity>=1.15.0          # Azure auth (Teams + OneDrive)
+
+# Phase 6: Heartbeat + Reflection
+anthropic>=0.100.0
+
+# Phase 7: Chat interface
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+botbuilder-core>=4.17.0
+botbuilder-integration-aiohttp>=4.17.0
+
+# Utilities
+# python-dotenv>=1.0.0

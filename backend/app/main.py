@@ -10,6 +10,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.archon_hub.models import ArchonAsset, CopyHistory  # noqa: F401
 from app.archon_hub.router import router as archon_router
+from app.vault.router import router as vault_router
 from app.auth.models import User  # noqa: F401 — ensures model is registered
 from app.auth.router import router as auth_router, users_router
 from app.second_brain.models import Note, NoteLink  # noqa: F401
@@ -98,6 +99,7 @@ app.include_router(users_router)
 app.include_router(archon_router)
 app.include_router(brain_router)
 app.include_router(task_router)
+app.include_router(vault_router)
 
 
 @app.get("/api/health")

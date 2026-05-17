@@ -1,0 +1,22 @@
+[Unit]
+Description=Orsox's Second Brain — Teams Chat Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/bernd/Workbench/borg
+ExecStart=/home/bernd/.claude/venv/bin/uvicorn .claude.chat.server:app \
+    --host 0.0.0.0 \
+    --port 8765 \
+    --log-level info
+EnvironmentFile=/home/bernd/Workbench/borg/.env
+Restart=on-failure
+RestartSec=10
+
+# View logs: journalctl --user -u second-brain-chat.service -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Orsox's Second Brain — Daily Reflection
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/bernd/Workbench/borg
+ExecStart=/home/bernd/.claude/venv/bin/python3 .claude/scripts/memory_reflect.py
+EnvironmentFile=/home/bernd/Workbench/borg/.env
+StandardOutput=journal
+StandardError=journal
