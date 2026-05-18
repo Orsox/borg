@@ -209,3 +209,48 @@ async def get_heartbeat_status(_user=Depends(get_current_user)):
         }
     except (json.JSONDecodeError, OSError) as e:
         raise HTTPException(status_code=500, detail=f"State read error: {e}")
+
+
+# ── Graph endpoints ────────────────────────────────────────────────────────────
+
+from .scanner import scan_vault
+from .graph import build_vault_graph
+from .schemas import VaultGraph
+
+
+@router.get("/graph", response_model=VaultGraph, summary="Get vault knowledge graph")
+async def get_vault_graph(_user=Depends(get_current_user)) -> VaultGraph:
+    """Return the vault's markdown notes and wiki-link relationships as a graph."""
+    def _build() -> VaultGraph:
+        if not VAULT.exists():
+            raise HTTPException(status_code=404, detail=f"Vault not found at {VAULT}")
+        return build_vault_graph(scan_vault(VAULT))
+
+    return await asyncio.to_thread(_build)
+
+
+@router.get("/file", summary="Read a vault markdown file")
+async def get_vault_file(
+    path: str = Query(..., min_length=1),
+    _user=Depends(get_current_user),
+) -> dict:
+    """Return the raw content of a .md file inside the vault."""
+    # Sanitize: reject path traversal
+    if ".." in path or path.startswith("/") or "\\" in path:
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    full = (VAULT / path).resolve()
+    vault_resolved = VAULT.resolve()
+
+    # Ensure resolved path is under the vault root
+    if vault_resolved not in full.parents and full != vault_resolved:
+        raise HTTPException(status_code=400, detail="Path outside vault")
+
+    if not full.exists() or not full.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if full.suffix.lower() != ".md":
+        raise HTTPException(status_code=400, detail="Only .md files are served")
+
+    content = await asyncio.to_thread(full.read_text, encoding="utf-8")
+    return {"path": path, "content": content}

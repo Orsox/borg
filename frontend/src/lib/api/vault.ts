@@ -61,3 +61,36 @@ export async function getHeartbeatStatus(): Promise<HeartbeatState | null> {
 		return null;
 	}
 }
+
+// ── Vault Graph ───────────────────────────────────────────────────────────────
+
+export type NoteKind =
+	| 'soul' | 'user' | 'memory' | 'habits' | 'heartbeat'
+	| 'daily' | 'draft' | 'meeting' | 'project' | 'note';
+
+export interface VaultGraphNode {
+	id: string;
+	title: string;
+	kind: NoteKind;
+	tags: string[];
+	backlink_count: number;
+	rel_path: string;
+}
+
+export interface VaultGraphEdge {
+	source: string;
+	target: string;
+}
+
+export interface VaultGraph {
+	nodes: VaultGraphNode[];
+	edges: VaultGraphEdge[];
+}
+
+export async function getVaultGraph(): Promise<VaultGraph> {
+	return apiFetch<VaultGraph>('/vault/graph');
+}
+
+export async function getVaultFile(path: string): Promise<{ path: string; content: string }> {
+	return apiFetch<{ path: string; content: string }>(`/vault/file?path=${encodeURIComponent(path)}`);
+}
