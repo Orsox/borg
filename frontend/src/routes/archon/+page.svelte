@@ -11,6 +11,7 @@
 	} from '$lib/api/archon';
 	import { toastStore } from '$lib/stores/toast';
 	import BorgPanel from '$lib/components/BorgPanel.svelte';
+	import ArchonSystemPanel from '$lib/components/ArchonSystemPanel.svelte';
 	import BorgButton from '$lib/components/BorgButton.svelte';
 	import BorgInput from '$lib/components/BorgInput.svelte';
 	import BorgBadge from '$lib/components/BorgBadge.svelte';
@@ -128,6 +129,8 @@
 </svelte:head>
 
 <div class="archon-hub">
+	<ArchonSystemPanel />
+
 	<!-- Header -->
 	<header class="module-header">
 		<div class="header-left">

@@ -26,7 +26,7 @@ class ArchonClient:
     async def __aenter__(self):
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
-            timeout=httpx.Timeout(connect=2.0, read=5.0),
+            timeout=httpx.Timeout(5.0, connect=2.0),
         )
         return self
 

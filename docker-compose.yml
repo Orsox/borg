@@ -12,10 +12,14 @@ services:
       - DATABASE_URL=sqlite+aiosqlite:///./borgos.db
       - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
       - INITIAL_PASSWORD=${INITIAL_PASSWORD:-borgborg}
-      - ARCHON_PATH=${ARCHON_PATH:-/opt/archon}
+      - ARCHON_PATH=${ARCHON_PATH:-/workspace/.archon}
+      - ARCHON_API_URL=${ARCHON_API_URL:-http://host.docker.internal:3090}
       - CORS_ORIGINS=http://localhost:5173,http://localhost:1701
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - borgos-data:/app/data
+      - ./.archon:/workspace/.archon:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]

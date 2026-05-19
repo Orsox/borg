@@ -215,6 +215,19 @@ async def test_health_shape_mapping():
 
 
 @pytest.mark.asyncio
+async def test_client_context_initializes_httpx_client():
+    """Client context manager creates an AsyncClient with a valid timeout."""
+    from app.archon_system.client import ArchonClient
+
+    client = ArchonClient("http://localhost:3090")
+
+    async with client:
+        assert client._client is not None
+
+    assert client._client is None
+
+
+@pytest.mark.asyncio
 async def test_health_fallback_no_cached_data(auth_headers):
     """When Archon is down and no cached data exists, returns valid empty response."""
     from app.main import app
