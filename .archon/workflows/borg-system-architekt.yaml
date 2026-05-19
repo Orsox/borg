@@ -1,29 +1,29 @@
 # ═════════════════════════════════════════════════════════════════════
-# Borg System Architekt — Paketbasierte Fresh-Context-Entwicklung
+# Borg System Architekt — Dynamische, sequenzielle Fresh-Context-Entwicklung
 # ═════════════════════════════════════════════════════════════════════
-# Inspiriert von archon-idea-to-pr, archon-plan-to-pr und archon-architect.
-# Der Workflow plant zuerst sauber trennbare Pakete und führt danach jedes
-# Paket mit hartem Kontext-Cut aus: Qwen implementiert, Gemma reviewed,
-# Qwen fixt, GPT 5.5 reviewed am Ende das Gesamtsystem.
+# Der Planner bestimmt die Anzahl der Tasks dynamisch. Danach arbeitet ein
+# einzelner sequenzieller Loop jeden Task nacheinander ab — mit hartem
+# Kontext-Cut pro Iteration, Qwen 3.6 auf Pi und Dateistate in $ARTIFACTS_DIR.
 # ═════════════════════════════════════════════════════════════════════
 
 name: borg-system-architekt
 description: |
   Use when: You have a feature idea, product requirement, architectural change, or existing plan
-  and want careful package-based implementation with hard context cuts.
+  and want careful task-based implementation with hard context cuts and no parallel task execution.
   Triggers: "borg system architekt", "system architekt", "architect and implement",
-            "plan packages", "fresh context implementation", "implement with package reviews".
+            "plan tasks", "fresh context implementation", "implement sequentially".
 
   Does:
-  1. Creates a strong architecture plan and up to 6 separable implementation packages.
-  2. Implements each package in its own fresh-context Qwen node.
-  3. Reviews each package in its own fresh-context Gemma node for a different local opinion.
-  4. Fixes each reviewed package in its own fresh-context Qwen node.
-  5. Runs deterministic validation.
-  6. Performs a final whole-system GPT 5.5 review.
-  7. Finalizes a PR and writes a workflow summary.
+  1. Creates a strong architecture plan and a dynamic task list.
+  2. Lets the planner decide how many tasks are needed.
+  3. Processes exactly one task per loop iteration with fresh context.
+  4. Performs implementation, focused self-review, and targeted fixes inside that iteration.
+  5. Persists all state to artifacts on disk so the loop can continue safely.
+  6. Runs deterministic validation.
+  7. Performs a final whole-system Qwen 3.6 review.
+  8. Finalizes a PR and writes a workflow summary.
 
-  NOT for: tiny one-file fixes, quick questions, standalone PR review, or workflows where context continuity is desired.
+  NOT for: tiny one-file fixes, quick questions, standalone PR review, or workflows where broad parallel fan-out is desired.
 
 provider: pi
 model: lm-studio/qwen/qwen3.6-27b
@@ -34,11 +34,19 @@ nodes:
   - id: init
     bash: |
       set -euo pipefail
-      mkdir -p "$ARTIFACTS_DIR/packages" "$ARTIFACTS_DIR/reviews" "$ARTIFACTS_DIR/fixes" "$ARTIFACTS_DIR/final"
+      mkdir -p "$ARTIFACTS_DIR/tasks" "$ARTIFACTS_DIR/reviews" "$ARTIFACTS_DIR/fixes" "$ARTIFACTS_DIR/final" "$ARTIFACTS_DIR/logs"
       cat > "$ARTIFACTS_DIR/state.json" << 'EOF'
       {
         "status": "initialized",
+        "mode": "sequential-dynamic-tasks",
         "finalReview": "pending"
+      }
+      EOF
+      cat > "$ARTIFACTS_DIR/task-list.json" << 'EOF'
+      {
+        "feature": "pending",
+        "baseBranch": "pending",
+        "tasks": []
       }
       EOF
       echo "Initialized Borg System Architekt artifacts at $ARTIFACTS_DIR"
@@ -47,16 +55,20 @@ nodes:
   - id: architecture-plan
     depends_on: [init]
     context: fresh
-    provider: claude
-    model: claude-opus-4-7
+    provider: pi
+    model: lm-studio/qwen/qwen3.6-27b
     effort: high
     thinking: enabled
-    idle_timeout: 1800000
+    idle_timeout: 7200000
+    retry:
+      max_attempts: 4
+      delay_ms: 5000
+      on_error: all
     prompt: |
-      # Borg System Architekt — Architecture and Package Planning
+      # Borg System Architekt — Dynamic Architecture and Task Planning
 
       You are the system architect. Transform the user's request into a safe,
-      package-based implementation plan. Do NOT implement code in this node.
+      task-based implementation plan. Do NOT implement code in this node.
 
       ## User Request
       $ARGUMENTS
@@ -64,58 +76,68 @@ nodes:
       ## Hard Rules
       - Plan only. Do not edit source files.
       - Inspect the codebase deeply enough to avoid fantasy architecture.
-      - Create 1 to 6 packages. Prefer fewer, cleaner packages over artificial splitting.
-      - Packages should be separable enough that different fresh-context agents can implement them.
-      - Each package must be self-contained: files to read, files to change, contracts,
+      - Decide the number of tasks dynamically. Do not force an artificial fixed count.
+      - Prefer fewer, stronger tasks over fragmented micro-tasks.
+      - Tasks must be sequenced so a single fresh-context worker can execute them one by one.
+      - Each task must be self-contained: files to read, files to change, contracts,
         validation commands, success criteria, and risks.
       - If two tasks cannot be cleanly separated, merge them.
-      - Avoid Opus for implementation. Implementation will be Qwen.
+      - Preserve existing architecture and patterns.
+      - Implementation later runs on Qwen 3.6 with fresh context per task, so every
+        task handoff must be fully bootstrappable from disk artifacts.
 
       ## Required Artifacts
       Write `$ARTIFACTS_DIR/architecture-plan.md` with:
       - Executive summary
       - Current architecture findings with file references
       - Target architecture
-      - Package breakdown table
-      - Cross-package contracts
+      - Dynamic task breakdown table in execution order
+      - Cross-task contracts and sequencing constraints
       - Risk register
       - Validation strategy
       - Rollback/containment notes
 
-      Write `$ARTIFACTS_DIR/task-list.json` as valid JSON with package ids `P01`, `P02`, ... up to `P06`:
+      Write `$ARTIFACTS_DIR/task-list.json` as valid JSON:
       ```json
       {
         "feature": "short name",
         "baseBranch": "$BASE_BRANCH",
-        "packages": [
+        "executionMode": "sequential",
+        "tasks": [
           {
-            "id": "P01",
+            "id": "T01",
             "title": "short imperative title",
             "status": "pending",
-            "reviewStatus": "pending",
-            "fixStatus": "pending",
-            "summary": "what this package delivers",
+            "summary": "what this task delivers",
             "readFiles": ["paths the implementer must inspect"],
             "changeFiles": ["paths expected to be created or modified"],
-            "contracts": ["interfaces/events/API shapes this package must preserve or expose"],
+            "contracts": ["interfaces/events/API shapes this task must preserve or expose"],
             "implementationSteps": ["step 1", "step 2"],
             "validationCommands": ["deterministic commands to run"],
             "successCriteria": ["observable criteria"],
-            "risks": ["package-specific risks"]
+            "risks": ["task-specific risks"],
+            "dependsOn": ["earlier task ids if any"]
           }
         ]
       }
       ```
 
-      Write one self-contained handoff per package:
-      `$ARTIFACTS_DIR/packages/P01.md`, `$ARTIFACTS_DIR/packages/P02.md`, ...
+      Requirements for `task-list.json`:
+      - Use contiguous task ids: `T01`, `T02`, `T03`, ...
+      - Create as many tasks as truly needed.
+      - Status values start as `pending`.
+      - `dependsOn` may be empty, but if present it may only reference earlier tasks.
+
+      Write one self-contained handoff per task:
+      `$ARTIFACTS_DIR/tasks/T01.md`, `$ARTIFACTS_DIR/tasks/T02.md`, ...
 
       Each handoff must include:
-      - Package id and title
+      - Task id and title
+      - Why this task exists now in sequence
       - Files to read first
       - Exact implementation steps
       - Expected file changes
-      - Contracts with other packages
+      - Contracts with earlier/later tasks
       - Validation commands
       - Done criteria
       - What NOT to do
@@ -129,933 +151,116 @@ nodes:
       test -s "$ARTIFACTS_DIR/architecture-plan.md"
       test -s "$ARTIFACTS_DIR/task-list.json"
       python3 - << 'PY'
-      import json, os, re, sys
+      import json, os, sys
       art = os.environ['ARTIFACTS_DIR']
       data = json.load(open(os.path.join(art, 'task-list.json')))
-      packages = data.get('packages')
-      if not isinstance(packages, list) or not packages:
-          raise SystemExit('task-list.json must contain a non-empty packages array')
-      if len(packages) > 6:
-          raise SystemExit('Borg System Architekt supports max 6 packages per run')
-      expected = [f'P{i:02d}' for i in range(1, len(packages)+1)]
-      ids = [p.get('id') for p in packages]
+      tasks = data.get('tasks')
+      if not isinstance(tasks, list) or not tasks:
+          raise SystemExit('task-list.json must contain a non-empty tasks array')
+      expected = [f'T{i:02d}' for i in range(1, len(tasks) + 1)]
+      ids = [t.get('id') for t in tasks]
       if ids != expected:
-          raise SystemExit(f'package ids must be contiguous: {expected}, got {ids}')
-      for p in packages:
-          pid = p['id']
-          handoff = os.path.join(art, 'packages', f'{pid}.md')
+          raise SystemExit(f'task ids must be contiguous: {expected}, got {ids}')
+      seen = set()
+      for task in tasks:
+          tid = task['id']
+          handoff = os.path.join(art, 'tasks', f'{tid}.md')
           if not os.path.exists(handoff) or os.path.getsize(handoff) == 0:
-              raise SystemExit(f'missing package handoff: {handoff}')
-          for key in ['title','summary','readFiles','changeFiles','implementationSteps','validationCommands','successCriteria']:
-              if key not in p:
-                  raise SystemExit(f'{pid} missing key {key}')
-      print(f'PLAN_OK packages={len(packages)} ids={",".join(ids)}')
+              raise SystemExit(f'missing task handoff: {handoff}')
+          for key in ['title','summary','readFiles','changeFiles','implementationSteps','validationCommands','successCriteria','dependsOn']:
+              if key not in task:
+                  raise SystemExit(f'{tid} missing key {key}')
+          deps = task.get('dependsOn', [])
+          if not isinstance(deps, list):
+              raise SystemExit(f'{tid} dependsOn must be a list')
+          for dep in deps:
+              if dep not in seen:
+                  raise SystemExit(f'{tid} has invalid or forward dependency: {dep}')
+          seen.add(tid)
+      print(f'PLAN_OK tasks={len(tasks)} ids={",".join(ids)}')
       PY
     timeout: 30000
 
-  # ── P01: implementation, independent review, and targeted fixes ──
-
-  - id: slot-p01
+  - id: process-tasks
     depends_on: [verify-plan-artifacts]
-    bash: |
-      set -euo pipefail
-      if python3 - << 'PY2'
-      import json, os, sys
-      p = os.path.join(os.environ['ARTIFACTS_DIR'], 'task-list.json')
-      data = json.load(open(p))
-      ids = [pkg.get('id') for pkg in data.get('packages', [])]
-      sys.exit(0 if 'P01' in ids else 1)
-      PY2
-      then
-        echo RUN
-      else
-        echo SKIP
-      fi
-    timeout: 10000
-
-  - id: implement-p01
-    depends_on: [slot-p01]
-    when: "$slot-p01.output == 'RUN'"
-    context: fresh
-    provider: pi
-    model: lm-studio/qwen/qwen3.6-27b
-    idle_timeout: 1800000
-    prompt: |
-      # Borg System Architekt — Implement P01
-
-      You are Qwen implementing package P01. This is a hard context cut.
-      You have no memory from planning or other packages except artifacts on disk.
-
-      ## Required First Reads
-      1. `$ARTIFACTS_DIR/architecture-plan.md`
-      2. `$ARTIFACTS_DIR/task-list.json`
-      3. `$ARTIFACTS_DIR/packages/P01.md`
-      4. Only the source files listed in the package handoff, plus directly necessary neighbors.
-
-      ## Scope Rules
-      - Implement ONLY package P01.
-      - Do not implement future packages.
-      - Do not refactor outside the stated package unless required for compilation, and document it.
-      - Preserve contracts from the architecture plan.
-      - If the package is blocked by an unmet dependency, do not guess. Write a blocker artifact.
-
-      ## Work Procedure
-      1. Mark package P01 as `in_progress` in `$ARTIFACTS_DIR/task-list.json`.
-      2. Implement the package with minimal, pattern-following changes.
-      3. Run the package validation commands where possible.
-      4. Write `$ARTIFACTS_DIR/packages/P01-implementation.md` with:
-         - Summary of changes
-         - Files changed
-         - Validation commands and exact results
-         - Deviations from plan
-         - Risks or questions for review
-      5. Update package P01 status to `implemented` or `blocked` in task-list.json.
-
-      End with `<promise>P01_IMPLEMENTED</promise>`.
-
-  - id: review-p01
-    depends_on: [implement-p01]
-    context: fresh
-    provider: pi
-    model: lm-studio/google/gemma-4-e4b
-    idle_timeout: 1800000
-    prompt: |
-      # Borg System Architekt — Independent Gemma Review for P01
-
-      You are Gemma reviewing package P01. This is a hard context cut.
-      You did not implement the package. Be skeptical, concrete, and evidence-based.
-
-      ## Required First Reads
-      1. `$ARTIFACTS_DIR/architecture-plan.md`
-      2. `$ARTIFACTS_DIR/task-list.json`
-      3. `$ARTIFACTS_DIR/packages/P01.md`
-      4. `$ARTIFACTS_DIR/packages/P01-implementation.md`
-      5. The actual changed files relevant to P01
-
-      ## Review Dimensions
-      - Scope discipline: only package P01 changed?
-      - Correctness against package success criteria
-      - Fit with existing architecture and project patterns
-      - Cross-package contract compatibility
-      - Edge cases and error handling
-      - Security/input validation/data safety
-      - Tests and validation evidence
-      - Simplicity and maintainability
-
-      ## Required Artifact
-      Write `$ARTIFACTS_DIR/reviews/P01-gemma-review.md`:
-      ```markdown
-      # Package Review — P01
-
-      ## Verdict: PASS / FAIL
-
-      ## Summary
-
-      ## Findings
-      ### CRITICAL
-      - [ ] finding → file:line
-      ### HIGH
-      - [ ] finding → file:line
-      ### MEDIUM
-      - [ ] finding → file:line
-      ### LOW
-      - [ ] finding → file:line
-
-      ## Required Fixes for Qwen
-      - concrete checklist
-      ```
-
-      Update package P01 `reviewStatus` in task-list.json to `passed` or `failed`.
-      End with `<promise>P01_REVIEWED</promise>`.
-
-  - id: fix-p01
-    depends_on: [review-p01]
-    context: fresh
-    provider: pi
-    model: lm-studio/qwen/qwen3.6-27b
-    idle_timeout: 1800000
-    prompt: |
-      # Borg System Architekt — Fix Review Findings for P01
-
-      You are Qwen fixing package P01. This is a hard context cut.
-
-      ## Required First Reads
-      - `$ARTIFACTS_DIR/task-list.json`
-      - `$ARTIFACTS_DIR/packages/P01.md`
-      - `$ARTIFACTS_DIR/packages/P01-implementation.md`
-      - `$ARTIFACTS_DIR/reviews/P01-gemma-review.md`
-
-      ## Behavior
-      - If the review verdict is PASS and has no unchecked CRITICAL/HIGH findings, write
-        `$ARTIFACTS_DIR/fixes/P01-no-fixes-needed.md` and stop.
-      - If the review verdict is FAIL, fix all CRITICAL and HIGH findings.
-      - Fix MEDIUM findings only when straightforward and low-risk.
-      - Do not broaden scope beyond package P01.
-      - Run relevant validation commands.
-
-      ## Required Artifact
-      Write `$ARTIFACTS_DIR/fixes/P01-fixes.md` or `P01-no-fixes-needed.md` with:
-      - Review findings addressed
-      - Files changed
-      - Validation results
-      - Remaining risks
-
-      Update package P01 `fixStatus` to `fixed` or `not_needed`.
-      End with `<promise>P01_FIX_DONE</promise>`.
-
-  # ── P02: implementation, independent review, and targeted fixes ──
-
-  - id: slot-p02
-    depends_on: [verify-plan-artifacts]
-    bash: |
-      set -euo pipefail
-      if python3 - << 'PY2'
-      import json, os, sys
-      p = os.path.join(os.environ['ARTIFACTS_DIR'], 'task-list.json')
-      data = json.load(open(p))
-      ids = [pkg.get('id') for pkg in data.get('packages', [])]
-      sys.exit(0 if 'P02' in ids else 1)
-      PY2
-      then
-        echo RUN
-      else
-        echo SKIP
-      fi
-    timeout: 10000
-
-  - id: implement-p02
-    depends_on: [slot-p02]
-    when: "$slot-p02.output == 'RUN'"
-    context: fresh
-    provider: pi
-    model: lm-studio/qwen/qwen3.6-27b
-    idle_timeout: 1800000
-    prompt: |
-      # Borg System Architekt — Implement P02
-
-      You are Qwen implementing package P02. This is a hard context cut.
-      You have no memory from planning or other packages except artifacts on disk.
-
-      ## Required First Reads
-      1. `$ARTIFACTS_DIR/architecture-plan.md`
-      2. `$ARTIFACTS_DIR/task-list.json`
-      3. `$ARTIFACTS_DIR/packages/P02.md`
-      4. Only the source files listed in the package handoff, plus directly necessary neighbors.
-
-      ## Scope Rules
-      - Implement ONLY package P02.
-      - Do not implement future packages.
-      - Do not refactor outside the stated package unless required for compilation, and document it.
-      - Preserve contracts from the architecture plan.
-      - If the package is blocked by an unmet dependency, do not guess. Write a blocker artifact.
-
-      ## Work Procedure
-      1. Mark package P02 as `in_progress` in `$ARTIFACTS_DIR/task-list.json`.
-      2. Implement the package with minimal, pattern-following changes.
-      3. Run the package validation commands where possible.
-      4. Write `$ARTIFACTS_DIR/packages/P02-implementation.md` with:
-         - Summary of changes
-         - Files changed
-         - Validation commands and exact results
-         - Deviations from plan
-         - Risks or questions for review
-      5. Update package P02 status to `implemented` or `blocked` in task-list.json.
-
-      End with `<promise>P02_IMPLEMENTED</promise>`.
-
-  - id: review-p02
-    depends_on: [implement-p02]
-    context: fresh
-    provider: pi
-    model: lm-studio/google/gemma-4-e4b
-    idle_timeout: 1800000
-    prompt: |
-      # Borg System Architekt — Independent Gemma Review for P02
-
-      You are Gemma reviewing package P02. This is a hard context cut.
-      You did not implement the package. Be skeptical, concrete, and evidence-based.
-
-      ## Required First Reads
-      1. `$ARTIFACTS_DIR/architecture-plan.md`
-      2. `$ARTIFACTS_DIR/task-list.json`
-      3. `$ARTIFACTS_DIR/packages/P02.md`
-      4. `$ARTIFACTS_DIR/packages/P02-implementation.md`
-      5. The actual changed files relevant to P02
-
-      ## Review Dimensions
-      - Scope discipline: only package P02 changed?
-      - Correctness against package success criteria
-      - Fit with existing architecture and project patterns
-      - Cross-package contract compatibility
-      - Edge cases and error handling
-      - Security/input validation/data safety
-      - Tests and validation evidence
-      - Simplicity and maintainability
-
-      ## Required Artifact
-      Write `$ARTIFACTS_DIR/reviews/P02-gemma-review.md`:
-      ```markdown
-      # Package Review — P02
-
-      ## Verdict: PASS / FAIL
-
-      ## Summary
-
-      ## Findings
-      ### CRITICAL
-      - [ ] finding → file:line
-      ### HIGH
-      - [ ] finding → file:line
-      ### MEDIUM
-      - [ ] finding → file:line
-      ### LOW
-      - [ ] finding → file:line
-
-      ## Required Fixes for Qwen
-      - concrete checklist
-      ```
-
-      Update package P02 `reviewStatus` in task-list.json to `passed` or `failed`.
-      End with `<promise>P02_REVIEWED</promise>`.
-
-  - id: fix-p02
-    depends_on: [review-p02]
-    context: fresh
-    provider: pi
-    model: lm-studio/qwen/qwen3.6-27b
-    idle_timeout: 1800000
-    prompt: |
-      # Borg System Architekt — Fix Review Findings for P02
-
-      You are Qwen fixing package P02. This is a hard context cut.
-
-      ## Required First Reads
-      - `$ARTIFACTS_DIR/task-list.json`
-      - `$ARTIFACTS_DIR/packages/P02.md`
-      - `$ARTIFACTS_DIR/packages/P02-implementation.md`
-      - `$ARTIFACTS_DIR/reviews/P02-gemma-review.md`
-
-      ## Behavior
-      - If the review verdict is PASS and has no unchecked CRITICAL/HIGH findings, write
-        `$ARTIFACTS_DIR/fixes/P02-no-fixes-needed.md` and stop.
-      - If the review verdict is FAIL, fix all CRITICAL and HIGH findings.
-      - Fix MEDIUM findings only when straightforward and low-risk.
-      - Do not broaden scope beyond package P02.
-      - Run relevant validation commands.
-
-      ## Required Artifact
-      Write `$ARTIFACTS_DIR/fixes/P02-fixes.md` or `P02-no-fixes-needed.md` with:
-      - Review findings addressed
-      - Files changed
-      - Validation results
-      - Remaining risks
-
-      Update package P02 `fixStatus` to `fixed` or `not_needed`.
-      End with `<promise>P02_FIX_DONE</promise>`.
-
-  # ── P03: implementation, independent review, and targeted fixes ──
-
-  - id: slot-p03
-    depends_on: [verify-plan-artifacts]
-    bash: |
-      set -euo pipefail
-      if python3 - << 'PY2'
-      import json, os, sys
-      p = os.path.join(os.environ['ARTIFACTS_DIR'], 'task-list.json')
-      data = json.load(open(p))
-      ids = [pkg.get('id') for pkg in data.get('packages', [])]
-      sys.exit(0 if 'P03' in ids else 1)
-      PY2
-      then
-        echo RUN
-      else
-        echo SKIP
-      fi
-    timeout: 10000
-
-  - id: implement-p03
-    depends_on: [slot-p03]
-    when: "$slot-p03.output == 'RUN'"
-    context: fresh
-    provider: pi
-    model: lm-studio/qwen/qwen3.6-27b
-    idle_timeout: 1800000
-    prompt: |
-      # Borg System Architekt — Implement P03
-
-      You are Qwen implementing package P03. This is a hard context cut.
-      You have no memory from planning or other packages except artifacts on disk.
-
-      ## Required First Reads
-      1. `$ARTIFACTS_DIR/architecture-plan.md`
-      2. `$ARTIFACTS_DIR/task-list.json`
-      3. `$ARTIFACTS_DIR/packages/P03.md`
-      4. Only the source files listed in the package handoff, plus directly necessary neighbors.
-
-      ## Scope Rules
-      - Implement ONLY package P03.
-      - Do not implement future packages.
-      - Do not refactor outside the stated package unless required for compilation, and document it.
-      - Preserve contracts from the architecture plan.
-      - If the package is blocked by an unmet dependency, do not guess. Write a blocker artifact.
-
-      ## Work Procedure
-      1. Mark package P03 as `in_progress` in `$ARTIFACTS_DIR/task-list.json`.
-      2. Implement the package with minimal, pattern-following changes.
-      3. Run the package validation commands where possible.
-      4. Write `$ARTIFACTS_DIR/packages/P03-implementation.md` with:
-         - Summary of changes
-         - Files changed
-         - Validation commands and exact results
-         - Deviations from plan
-         - Risks or questions for review
-      5. Update package P03 status to `implemented` or `blocked` in task-list.json.
-
-      End with `<promise>P03_IMPLEMENTED</promise>`.
-
-  - id: review-p03
-    depends_on: [implement-p03]
-    context: fresh
-    provider: pi
-    model: lm-studio/google/gemma-4-e4b
-    idle_timeout: 1800000
-    prompt: |
-      # Borg System Architekt — Independent Gemma Review for P03
-
-      You are Gemma reviewing package P03. This is a hard context cut.
-      You did not implement the package. Be skeptical, concrete, and evidence-based.
-
-      ## Required First Reads
-      1. `$ARTIFACTS_DIR/architecture-plan.md`
-      2. `$ARTIFACTS_DIR/task-list.json`
-      3. `$ARTIFACTS_DIR/packages/P03.md`
-      4. `$ARTIFACTS_DIR/packages/P03-implementation.md`
-      5. The actual changed files relevant to P03
-
-      ## Review Dimensions
-      - Scope discipline: only package P03 changed?
-      - Correctness against package success criteria
-      - Fit with existing architecture and project patterns
-      - Cross-package contract compatibility
-      - Edge cases and error handling
-      - Security/input validation/data safety
-      - Tests and validation evidence
-      - Simplicity and maintainability
-
-      ## Required Artifact
-      Write `$ARTIFACTS_DIR/reviews/P03-gemma-review.md`:
-      ```markdown
-      # Package Review — P03
-
-      ## Verdict: PASS / FAIL
-
-      ## Summary
-
-      ## Findings
-      ### CRITICAL
-      - [ ] finding → file:line
-      ### HIGH
-      - [ ] finding → file:line
-      ### MEDIUM
-      - [ ] finding → file:line
-      ### LOW
-      - [ ] finding → file:line
-
-      ## Required Fixes for Qwen
-      - concrete checklist
-      ```
-
-      Update package P03 `reviewStatus` in task-list.json to `passed` or `failed`.
-      End with `<promise>P03_REVIEWED</promise>`.
-
-  - id: fix-p03
-    depends_on: [review-p03]
-    context: fresh
-    provider: pi
-    model: lm-studio/qwen/qwen3.6-27b
-    idle_timeout: 1800000
-    prompt: |
-      # Borg System Architekt — Fix Review Findings for P03
-
-      You are Qwen fixing package P03. This is a hard context cut.
-
-      ## Required First Reads
-      - `$ARTIFACTS_DIR/task-list.json`
-      - `$ARTIFACTS_DIR/packages/P03.md`
-      - `$ARTIFACTS_DIR/packages/P03-implementation.md`
-      - `$ARTIFACTS_DIR/reviews/P03-gemma-review.md`
-
-      ## Behavior
-      - If the review verdict is PASS and has no unchecked CRITICAL/HIGH findings, write
-        `$ARTIFACTS_DIR/fixes/P03-no-fixes-needed.md` and stop.
-      - If the review verdict is FAIL, fix all CRITICAL and HIGH findings.
-      - Fix MEDIUM findings only when straightforward and low-risk.
-      - Do not broaden scope beyond package P03.
-      - Run relevant validation commands.
-
-      ## Required Artifact
-      Write `$ARTIFACTS_DIR/fixes/P03-fixes.md` or `P03-no-fixes-needed.md` with:
-      - Review findings addressed
-      - Files changed
-      - Validation results
-      - Remaining risks
-
-      Update package P03 `fixStatus` to `fixed` or `not_needed`.
-      End with `<promise>P03_FIX_DONE</promise>`.
-
-  # ── P04: implementation, independent review, and targeted fixes ──
-
-  - id: slot-p04
-    depends_on: [verify-plan-artifacts]
-    bash: |
-      set -euo pipefail
-      if python3 - << 'PY2'
-      import json, os, sys
-      p = os.path.join(os.environ['ARTIFACTS_DIR'], 'task-list.json')
-      data = json.load(open(p))
-      ids = [pkg.get('id') for pkg in data.get('packages', [])]
-      sys.exit(0 if 'P04' in ids else 1)
-      PY2
-      then
-        echo RUN
-      else
-        echo SKIP
-      fi
-    timeout: 10000
-
-  - id: implement-p04
-    depends_on: [slot-p04]
-    when: "$slot-p04.output == 'RUN'"
-    context: fresh
-    provider: pi
-    model: lm-studio/qwen/qwen3.6-27b
-    idle_timeout: 1800000
-    prompt: |
-      # Borg System Architekt — Implement P04
-
-      You are Qwen implementing package P04. This is a hard context cut.
-      You have no memory from planning or other packages except artifacts on disk.
-
-      ## Required First Reads
-      1. `$ARTIFACTS_DIR/architecture-plan.md`
-      2. `$ARTIFACTS_DIR/task-list.json`
-      3. `$ARTIFACTS_DIR/packages/P04.md`
-      4. Only the source files listed in the package handoff, plus directly necessary neighbors.
-
-      ## Scope Rules
-      - Implement ONLY package P04.
-      - Do not implement future packages.
-      - Do not refactor outside the stated package unless required for compilation, and document it.
-      - Preserve contracts from the architecture plan.
-      - If the package is blocked by an unmet dependency, do not guess. Write a blocker artifact.
-
-      ## Work Procedure
-      1. Mark package P04 as `in_progress` in `$ARTIFACTS_DIR/task-list.json`.
-      2. Implement the package with minimal, pattern-following changes.
-      3. Run the package validation commands where possible.
-      4. Write `$ARTIFACTS_DIR/packages/P04-implementation.md` with:
-         - Summary of changes
-         - Files changed
-         - Validation commands and exact results
-         - Deviations from plan
-         - Risks or questions for review
-      5. Update package P04 status to `implemented` or `blocked` in task-list.json.
-
-      End with `<promise>P04_IMPLEMENTED</promise>`.
-
-  - id: review-p04
-    depends_on: [implement-p04]
-    context: fresh
-    provider: pi
-    model: lm-studio/google/gemma-4-e4b
-    idle_timeout: 1800000
-    prompt: |
-      # Borg System Architekt — Independent Gemma Review for P04
-
-      You are Gemma reviewing package P04. This is a hard context cut.
-      You did not implement the package. Be skeptical, concrete, and evidence-based.
-
-      ## Required First Reads
-      1. `$ARTIFACTS_DIR/architecture-plan.md`
-      2. `$ARTIFACTS_DIR/task-list.json`
-      3. `$ARTIFACTS_DIR/packages/P04.md`
-      4. `$ARTIFACTS_DIR/packages/P04-implementation.md`
-      5. The actual changed files relevant to P04
-
-      ## Review Dimensions
-      - Scope discipline: only package P04 changed?
-      - Correctness against package success criteria
-      - Fit with existing architecture and project patterns
-      - Cross-package contract compatibility
-      - Edge cases and error handling
-      - Security/input validation/data safety
-      - Tests and validation evidence
-      - Simplicity and maintainability
-
-      ## Required Artifact
-      Write `$ARTIFACTS_DIR/reviews/P04-gemma-review.md`:
-      ```markdown
-      # Package Review — P04
-
-      ## Verdict: PASS / FAIL
-
-      ## Summary
-
-      ## Findings
-      ### CRITICAL
-      - [ ] finding → file:line
-      ### HIGH
-      - [ ] finding → file:line
-      ### MEDIUM
-      - [ ] finding → file:line
-      ### LOW
-      - [ ] finding → file:line
-
-      ## Required Fixes for Qwen
-      - concrete checklist
-      ```
-
-      Update package P04 `reviewStatus` in task-list.json to `passed` or `failed`.
-      End with `<promise>P04_REVIEWED</promise>`.
-
-  - id: fix-p04
-    depends_on: [review-p04]
-    context: fresh
-    provider: pi
-    model: lm-studio/qwen/qwen3.6-27b
-    idle_timeout: 1800000
-    prompt: |
-      # Borg System Architekt — Fix Review Findings for P04
-
-      You are Qwen fixing package P04. This is a hard context cut.
-
-      ## Required First Reads
-      - `$ARTIFACTS_DIR/task-list.json`
-      - `$ARTIFACTS_DIR/packages/P04.md`
-      - `$ARTIFACTS_DIR/packages/P04-implementation.md`
-      - `$ARTIFACTS_DIR/reviews/P04-gemma-review.md`
-
-      ## Behavior
-      - If the review verdict is PASS and has no unchecked CRITICAL/HIGH findings, write
-        `$ARTIFACTS_DIR/fixes/P04-no-fixes-needed.md` and stop.
-      - If the review verdict is FAIL, fix all CRITICAL and HIGH findings.
-      - Fix MEDIUM findings only when straightforward and low-risk.
-      - Do not broaden scope beyond package P04.
-      - Run relevant validation commands.
-
-      ## Required Artifact
-      Write `$ARTIFACTS_DIR/fixes/P04-fixes.md` or `P04-no-fixes-needed.md` with:
-      - Review findings addressed
-      - Files changed
-      - Validation results
-      - Remaining risks
-
-      Update package P04 `fixStatus` to `fixed` or `not_needed`.
-      End with `<promise>P04_FIX_DONE</promise>`.
-
-  # ── P05: implementation, independent review, and targeted fixes ──
-
-  - id: slot-p05
-    depends_on: [verify-plan-artifacts]
-    bash: |
-      set -euo pipefail
-      if python3 - << 'PY2'
-      import json, os, sys
-      p = os.path.join(os.environ['ARTIFACTS_DIR'], 'task-list.json')
-      data = json.load(open(p))
-      ids = [pkg.get('id') for pkg in data.get('packages', [])]
-      sys.exit(0 if 'P05' in ids else 1)
-      PY2
-      then
-        echo RUN
-      else
-        echo SKIP
-      fi
-    timeout: 10000
-
-  - id: implement-p05
-    depends_on: [slot-p05]
-    when: "$slot-p05.output == 'RUN'"
-    context: fresh
-    provider: pi
-    model: lm-studio/qwen/qwen3.6-27b
-    idle_timeout: 1800000
-    prompt: |
-      # Borg System Architekt — Implement P05
-
-      You are Qwen implementing package P05. This is a hard context cut.
-      You have no memory from planning or other packages except artifacts on disk.
-
-      ## Required First Reads
-      1. `$ARTIFACTS_DIR/architecture-plan.md`
-      2. `$ARTIFACTS_DIR/task-list.json`
-      3. `$ARTIFACTS_DIR/packages/P05.md`
-      4. Only the source files listed in the package handoff, plus directly necessary neighbors.
-
-      ## Scope Rules
-      - Implement ONLY package P05.
-      - Do not implement future packages.
-      - Do not refactor outside the stated package unless required for compilation, and document it.
-      - Preserve contracts from the architecture plan.
-      - If the package is blocked by an unmet dependency, do not guess. Write a blocker artifact.
-
-      ## Work Procedure
-      1. Mark package P05 as `in_progress` in `$ARTIFACTS_DIR/task-list.json`.
-      2. Implement the package with minimal, pattern-following changes.
-      3. Run the package validation commands where possible.
-      4. Write `$ARTIFACTS_DIR/packages/P05-implementation.md` with:
-         - Summary of changes
-         - Files changed
-         - Validation commands and exact results
-         - Deviations from plan
-         - Risks or questions for review
-      5. Update package P05 status to `implemented` or `blocked` in task-list.json.
-
-      End with `<promise>P05_IMPLEMENTED</promise>`.
-
-  - id: review-p05
-    depends_on: [implement-p05]
-    context: fresh
-    provider: pi
-    model: lm-studio/google/gemma-4-e4b
-    idle_timeout: 1800000
-    prompt: |
-      # Borg System Architekt — Independent Gemma Review for P05
-
-      You are Gemma reviewing package P05. This is a hard context cut.
-      You did not implement the package. Be skeptical, concrete, and evidence-based.
-
-      ## Required First Reads
-      1. `$ARTIFACTS_DIR/architecture-plan.md`
-      2. `$ARTIFACTS_DIR/task-list.json`
-      3. `$ARTIFACTS_DIR/packages/P05.md`
-      4. `$ARTIFACTS_DIR/packages/P05-implementation.md`
-      5. The actual changed files relevant to P05
-
-      ## Review Dimensions
-      - Scope discipline: only package P05 changed?
-      - Correctness against package success criteria
-      - Fit with existing architecture and project patterns
-      - Cross-package contract compatibility
-      - Edge cases and error handling
-      - Security/input validation/data safety
-      - Tests and validation evidence
-      - Simplicity and maintainability
-
-      ## Required Artifact
-      Write `$ARTIFACTS_DIR/reviews/P05-gemma-review.md`:
-      ```markdown
-      # Package Review — P05
-
-      ## Verdict: PASS / FAIL
-
-      ## Summary
-
-      ## Findings
-      ### CRITICAL
-      - [ ] finding → file:line
-      ### HIGH
-      - [ ] finding → file:line
-      ### MEDIUM
-      - [ ] finding → file:line
-      ### LOW
-      - [ ] finding → file:line
-
-      ## Required Fixes for Qwen
-      - concrete checklist
-      ```
-
-      Update package P05 `reviewStatus` in task-list.json to `passed` or `failed`.
-      End with `<promise>P05_REVIEWED</promise>`.
-
-  - id: fix-p05
-    depends_on: [review-p05]
-    context: fresh
-    provider: pi
-    model: lm-studio/qwen/qwen3.6-27b
-    idle_timeout: 1800000
-    prompt: |
-      # Borg System Architekt — Fix Review Findings for P05
-
-      You are Qwen fixing package P05. This is a hard context cut.
-
-      ## Required First Reads
-      - `$ARTIFACTS_DIR/task-list.json`
-      - `$ARTIFACTS_DIR/packages/P05.md`
-      - `$ARTIFACTS_DIR/packages/P05-implementation.md`
-      - `$ARTIFACTS_DIR/reviews/P05-gemma-review.md`
-
-      ## Behavior
-      - If the review verdict is PASS and has no unchecked CRITICAL/HIGH findings, write
-        `$ARTIFACTS_DIR/fixes/P05-no-fixes-needed.md` and stop.
-      - If the review verdict is FAIL, fix all CRITICAL and HIGH findings.
-      - Fix MEDIUM findings only when straightforward and low-risk.
-      - Do not broaden scope beyond package P05.
-      - Run relevant validation commands.
-
-      ## Required Artifact
-      Write `$ARTIFACTS_DIR/fixes/P05-fixes.md` or `P05-no-fixes-needed.md` with:
-      - Review findings addressed
-      - Files changed
-      - Validation results
-      - Remaining risks
-
-      Update package P05 `fixStatus` to `fixed` or `not_needed`.
-      End with `<promise>P05_FIX_DONE</promise>`.
-
-  # ── P06: implementation, independent review, and targeted fixes ──
-
-  - id: slot-p06
-    depends_on: [verify-plan-artifacts]
-    bash: |
-      set -euo pipefail
-      if python3 - << 'PY2'
-      import json, os, sys
-      p = os.path.join(os.environ['ARTIFACTS_DIR'], 'task-list.json')
-      data = json.load(open(p))
-      ids = [pkg.get('id') for pkg in data.get('packages', [])]
-      sys.exit(0 if 'P06' in ids else 1)
-      PY2
-      then
-        echo RUN
-      else
-        echo SKIP
-      fi
-    timeout: 10000
-
-  - id: implement-p06
-    depends_on: [slot-p06]
-    when: "$slot-p06.output == 'RUN'"
-    context: fresh
-    provider: pi
-    model: lm-studio/qwen/qwen3.6-27b
-    idle_timeout: 1800000
-    prompt: |
-      # Borg System Architekt — Implement P06
-
-      You are Qwen implementing package P06. This is a hard context cut.
-      You have no memory from planning or other packages except artifacts on disk.
-
-      ## Required First Reads
-      1. `$ARTIFACTS_DIR/architecture-plan.md`
-      2. `$ARTIFACTS_DIR/task-list.json`
-      3. `$ARTIFACTS_DIR/packages/P06.md`
-      4. Only the source files listed in the package handoff, plus directly necessary neighbors.
-
-      ## Scope Rules
-      - Implement ONLY package P06.
-      - Do not implement future packages.
-      - Do not refactor outside the stated package unless required for compilation, and document it.
-      - Preserve contracts from the architecture plan.
-      - If the package is blocked by an unmet dependency, do not guess. Write a blocker artifact.
-
-      ## Work Procedure
-      1. Mark package P06 as `in_progress` in `$ARTIFACTS_DIR/task-list.json`.
-      2. Implement the package with minimal, pattern-following changes.
-      3. Run the package validation commands where possible.
-      4. Write `$ARTIFACTS_DIR/packages/P06-implementation.md` with:
-         - Summary of changes
-         - Files changed
-         - Validation commands and exact results
-         - Deviations from plan
-         - Risks or questions for review
-      5. Update package P06 status to `implemented` or `blocked` in task-list.json.
-
-      End with `<promise>P06_IMPLEMENTED</promise>`.
-
-  - id: review-p06
-    depends_on: [implement-p06]
-    context: fresh
-    provider: pi
-    model: lm-studio/google/gemma-4-e4b
-    idle_timeout: 1800000
-    prompt: |
-      # Borg System Architekt — Independent Gemma Review for P06
-
-      You are Gemma reviewing package P06. This is a hard context cut.
-      You did not implement the package. Be skeptical, concrete, and evidence-based.
-
-      ## Required First Reads
-      1. `$ARTIFACTS_DIR/architecture-plan.md`
-      2. `$ARTIFACTS_DIR/task-list.json`
-      3. `$ARTIFACTS_DIR/packages/P06.md`
-      4. `$ARTIFACTS_DIR/packages/P06-implementation.md`
-      5. The actual changed files relevant to P06
-
-      ## Review Dimensions
-      - Scope discipline: only package P06 changed?
-      - Correctness against package success criteria
-      - Fit with existing architecture and project patterns
-      - Cross-package contract compatibility
-      - Edge cases and error handling
-      - Security/input validation/data safety
-      - Tests and validation evidence
-      - Simplicity and maintainability
-
-      ## Required Artifact
-      Write `$ARTIFACTS_DIR/reviews/P06-gemma-review.md`:
-      ```markdown
-      # Package Review — P06
-
-      ## Verdict: PASS / FAIL
-
-      ## Summary
-
-      ## Findings
-      ### CRITICAL
-      - [ ] finding → file:line
-      ### HIGH
-      - [ ] finding → file:line
-      ### MEDIUM
-      - [ ] finding → file:line
-      ### LOW
-      - [ ] finding → file:line
-
-      ## Required Fixes for Qwen
-      - concrete checklist
-      ```
-
-      Update package P06 `reviewStatus` in task-list.json to `passed` or `failed`.
-      End with `<promise>P06_REVIEWED</promise>`.
-
-  - id: fix-p06
-    depends_on: [review-p06]
-    context: fresh
-    provider: pi
-    model: lm-studio/qwen/qwen3.6-27b
-    idle_timeout: 1800000
-    prompt: |
-      # Borg System Architekt — Fix Review Findings for P06
-
-      You are Qwen fixing package P06. This is a hard context cut.
-
-      ## Required First Reads
-      - `$ARTIFACTS_DIR/task-list.json`
-      - `$ARTIFACTS_DIR/packages/P06.md`
-      - `$ARTIFACTS_DIR/packages/P06-implementation.md`
-      - `$ARTIFACTS_DIR/reviews/P06-gemma-review.md`
-
-      ## Behavior
-      - If the review verdict is PASS and has no unchecked CRITICAL/HIGH findings, write
-        `$ARTIFACTS_DIR/fixes/P06-no-fixes-needed.md` and stop.
-      - If the review verdict is FAIL, fix all CRITICAL and HIGH findings.
-      - Fix MEDIUM findings only when straightforward and low-risk.
-      - Do not broaden scope beyond package P06.
-      - Run relevant validation commands.
-
-      ## Required Artifact
-      Write `$ARTIFACTS_DIR/fixes/P06-fixes.md` or `P06-no-fixes-needed.md` with:
-      - Review findings addressed
-      - Files changed
-      - Validation results
-      - Remaining risks
-
-      Update package P06 `fixStatus` to `fixed` or `not_needed`.
-      End with `<promise>P06_FIX_DONE</promise>`.
+    idle_timeout: 7200000
+    loop:
+      max_iterations: 40
+      fresh_context: true
+      until: ALL_TASKS_COMPLETE
+      until_bash: |
+        python3 - << 'PY'
+        import json, os, sys
+        data = json.load(open(os.path.join(os.environ['ARTIFACTS_DIR'], 'task-list.json')))
+        tasks = data.get('tasks', [])
+        if not tasks:
+            sys.exit(1)
+        open_statuses = {'pending', 'in_progress', 'reviewing', 'fixing'}
+        if any(task.get('status') in open_statuses for task in tasks):
+            sys.exit(1)
+        sys.exit(0)
+        PY
+      prompt: |
+        # Borg System Architekt — Sequential Dynamic Task Worker
+
+        You are Qwen 3.6 executing exactly one planned task in this iteration.
+        This is a hard context cut. You have no memory except what you read from disk.
+
+        ## Core Inputs
+        - User request: `$ARGUMENTS`
+        - Architecture plan: `$ARTIFACTS_DIR/architecture-plan.md`
+        - Task list: `$ARTIFACTS_DIR/task-list.json`
+        - Workflow state: `$ARTIFACTS_DIR/state.json`
+        - Previous iteration output: `$LOOP_PREV_OUTPUT`
+
+        ## Mission
+        Process exactly one eligible task from `task-list.json` per iteration.
+        Eligible means:
+        - `status` is `pending`
+        - all `dependsOn` tasks are already terminal (`done` or `blocked`)
+
+        If there is no eligible task and no task remains open, output:
+        `<promise>ALL_TASKS_COMPLETE</promise>`
+
+        ## Required Procedure
+        1. Read the architecture plan and full task list.
+        2. Select the next eligible task in order.
+        3. Mark that task `in_progress` in `task-list.json`.
+        4. Read `$ARTIFACTS_DIR/tasks/<TASK_ID>.md` and the listed source files.
+        5. Implement only that task.
+        6. Run the task's validation commands where possible.
+        7. Perform a focused self-review of only that task against:
+           - scope discipline
+           - correctness
+           - contract compatibility
+           - error handling
+           - simplicity
+           - validation evidence
+        8. Fix your own concrete findings immediately if they are safe and in scope.
+        9. Write these artifacts for the task:
+           - `$ARTIFACTS_DIR/tasks/<TASK_ID>-implementation.md`
+           - `$ARTIFACTS_DIR/reviews/<TASK_ID>-review.md`
+           - `$ARTIFACTS_DIR/fixes/<TASK_ID>-fixes.md` or `<TASK_ID>-no-fixes-needed.md`
+        10. Update `task-list.json`:
+            - `done` if task is complete and validated enough
+            - `blocked` only if a real blocker remains after investigation
+        11. If blocked, record the blocker clearly in the task artifacts and status.
+
+        ## Hard Rules
+        - Never start a second task in the same iteration.
+        - Do not broaden scope beyond the selected task unless required for compilation,
+          and document any spillover explicitly.
+        - Prefer minimal, pattern-following edits.
+        - Re-bootstrap from disk; do not rely on hidden memory.
+        - If validation fails, attempt targeted in-scope fixes before declaring blocked.
+
+        ## Output Contract
+        End your response with one of:
+        - `<promise>TASK_PROCESSED</promise>` when one task was handled
+        - `<promise>ALL_TASKS_COMPLETE</promise>` when all tasks are terminal
 
   - id: validate
-    depends_on: [fix-p01, fix-p02, fix-p03, fix-p04, fix-p05, fix-p06]
-    trigger_rule: all_done
+    depends_on: [process-tasks]
     bash: |
       set +e
       mkdir -p "$ARTIFACTS_DIR/final"
@@ -1095,19 +300,23 @@ nodes:
     depends_on: [validate]
     context: fresh
     provider: pi
-    model: openai/gpt-5.5
-    idle_timeout: 1800000
+    model: lm-studio/qwen/qwen3.6-27b
+    idle_timeout: 7200000
+    retry:
+      max_attempts: 4
+      delay_ms: 5000
+      on_error: all
     prompt: |
       # Borg System Architekt — Final Whole-System Review
 
-      You are the final reviewer. Start from a blank context and judge the entire implementation.
+      You are Qwen 3.6 as the final reviewer. Start from a blank context and judge the entire implementation.
       Be strict, evidence-based, and specific. Do not rubber-stamp.
 
       ## Read These Artifacts
       - `$ARTIFACTS_DIR/architecture-plan.md`
       - `$ARTIFACTS_DIR/task-list.json`
-      - `$ARTIFACTS_DIR/packages/*.md`
-      - `$ARTIFACTS_DIR/reviews/*-gemma-review.md`
+      - `$ARTIFACTS_DIR/tasks/*.md`
+      - `$ARTIFACTS_DIR/reviews/*-review.md`
       - `$ARTIFACTS_DIR/fixes/*.md` if present
       - `$ARTIFACTS_DIR/final/validation.md`
 
@@ -1121,20 +330,20 @@ nodes:
 
       ## Review Dimensions
       1. The implementation satisfies the original user request.
-      2. The package plan was followed or deviations are justified.
-      3. Cross-package integration is coherent.
+      2. The dynamic task plan was followed or deviations are justified.
+      3. Sequential task integration is coherent.
       4. Public APIs, schemas, and UI contracts are consistent.
       5. Tests/validation are adequate for the risk.
       6. Security and data-safety concerns are handled.
       7. The result is maintainable and simple enough.
       8. No obvious generated-code artifacts, dead code, or accidental broad changes remain.
 
-      Write `$ARTIFACTS_DIR/final/gpt-5.5-final-review.md` with:
+      Write `$ARTIFACTS_DIR/final/qwen-final-review.md` with:
       - Verdict: PASS / FAIL
       - Executive summary
       - Blocking findings with file:line evidence
       - Non-blocking findings
-      - Package traceability table
+      - Task traceability table
       - Validation assessment
       - Merge recommendation
 
@@ -1146,8 +355,12 @@ nodes:
     depends_on: [final-system-review]
     context: fresh
     provider: pi
-    model: lm-studio/google/gemma-4-e4b
-    idle_timeout: 1800000
+    model: lm-studio/qwen/qwen3.6-27b
+    idle_timeout: 7200000
+    retry:
+      max_attempts: 4
+      delay_ms: 5000
+      on_error: all
 
   - id: workflow-summary
     command: archon-workflow-summary
@@ -1155,4 +368,8 @@ nodes:
     context: fresh
     provider: pi
     model: lm-studio/qwen/qwen3.6-27b
-    idle_timeout: 1800000
+    idle_timeout: 7200000
+    retry:
+      max_attempts: 4
+      delay_ms: 5000
+      on_error: all
