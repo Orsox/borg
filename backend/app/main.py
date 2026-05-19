@@ -14,7 +14,10 @@ from app.vault.router import router as vault_router
 from app.auth.models import User  # noqa: F401 — ensures model is registered
 from app.auth.router import router as auth_router, users_router
 from app.second_brain.models import Note, NoteLink  # noqa: F401
+from app.second_brain.action_models import ActionMemory  # noqa: F401
 from app.second_brain.router import router as brain_router
+from app.second_brain.action_router import router as action_router
+from app.second_brain import action_service as action_memory_service
 from app.task_automation.models import Task, TaskRun  # noqa: F401
 from app.task_automation.router import router as task_router
 from app.task_automation.scheduler import init_scheduler, shutdown_scheduler, reload_all_tasks
@@ -58,9 +61,10 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass  # column already exists
 
-    # Seed default admin user
+    # Seed default admin user + initial action memories
     async with AsyncSessionLocal() as db:
         await seed_default_user(db)
+        await action_memory_service.seed_default_actions(db)
 
     # Initialize scheduler
     await init_scheduler()
@@ -98,6 +102,7 @@ app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(archon_router)
 app.include_router(brain_router)
+app.include_router(action_router)
 app.include_router(task_router)
 app.include_router(vault_router)
 
