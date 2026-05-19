@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     refresh_token_expire_days: int = 7
     initial_password: str = "borgborg"
     archon_path: str = "/opt/archon"
+    archon_api_url: str = "http://localhost:3090"
     cors_origins: str = "http://localhost:5173"
 
     model_config = SettingsConfigDict(

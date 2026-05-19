@@ -10,6 +10,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.archon_hub.models import ArchonAsset, CopyHistory  # noqa: F401
 from app.archon_hub.router import router as archon_router
+from app.archon_system.models import ArchonSystemHealth, ArchonRun, ArchonCodebase, ArchonWorkflowMeta  # noqa: F401
+from app.archon_system.router import router as archon_system_router
 from app.vault.router import router as vault_router
 from app.auth.models import User  # noqa: F401 — ensures model is registered
 from app.auth.router import router as auth_router, users_router
@@ -101,6 +103,7 @@ app.add_exception_handler(Exception, generic_exception_handler)
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(archon_router)
+app.include_router(archon_system_router)
 app.include_router(brain_router)
 app.include_router(action_router)
 app.include_router(task_router)

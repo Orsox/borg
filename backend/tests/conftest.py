@@ -5,6 +5,7 @@ import pytest_asyncio
 
 from app.auth.service import seed_default_user
 from app.database import Base, AsyncSessionLocal, engine
+from app.archon_system.models import ArchonSystemHealth, ArchonRun, ArchonCodebase, ArchonWorkflowMeta  # noqa: F401
 
 
 @pytest_asyncio.fixture(autouse=True)

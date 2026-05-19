@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { currentUser } from '$lib/stores/auth';
 	import BorgPanel from '$lib/components/BorgPanel.svelte';
+	import ArchonSystemPanel from '$lib/components/ArchonSystemPanel.svelte';
 </script>
 
 <svelte:head>
@@ -12,6 +13,8 @@
 		<h1>BORGOS DASHBOARD</h1>
 		<p class="subtitle">Welcome, {$currentUser?.username ?? ''}. You have been assimilated.</p>
 	</header>
+
+	<ArchonSystemPanel />
 
 	<div class="module-grid">
 		<BorgPanel class="module-card">
