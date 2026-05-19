@@ -15,7 +15,7 @@ dependencies = [
     "pydantic-settings>=2.7.0",
     "python-dotenv==1.0.1",
     "python-multipart==0.0.12",
-    "pyyaml>=6.0.0",
+    "pyyaml>=6.0.0", "python-frontmatter>=1.1.0",
     "apscheduler>=3.10.0",
     "watchfiles>=0.22.0",
 ]
