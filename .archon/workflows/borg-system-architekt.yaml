@@ -3,7 +3,8 @@
 # ═════════════════════════════════════════════════════════════════════
 # Der Planner bestimmt die Anzahl der Tasks dynamisch. Danach arbeitet ein
 # einzelner sequenzieller Loop jeden Task nacheinander ab — mit hartem
-# Kontext-Cut pro Iteration, Qwen 3.6 auf Pi und Dateistate in $ARTIFACTS_DIR.
+# Kontext-Cut pro Iteration, modell-spezifischem Routing und Dateistate in
+# $ARTIFACTS_DIR.
 # ═════════════════════════════════════════════════════════════════════
 
 name: borg-system-architekt
@@ -14,19 +15,20 @@ description: |
             "plan tasks", "fresh context implementation", "implement sequentially".
 
   Does:
-  1. Creates a strong architecture plan and a dynamic task list.
-  2. Lets the planner decide how many tasks are needed.
-  3. Processes exactly one task per loop iteration with fresh context.
-  4. Performs implementation, focused self-review, and targeted fixes inside that iteration.
-  5. Persists all state to artifacts on disk so the loop can continue safely.
+  1. Qwen 3.6 drafts a pre-plan / architecture plan.
+  2. Claude Opus 4.7 reviews that draft from fresh context only and raises questions.
+  3. The user approves or responds to the review gate.
+  4. Qwen finalizes the plan and generates sequential execution subtasks.
+  5. Qwen processes exactly one subtask per loop iteration with fresh context.
   6. Runs deterministic validation.
-  7. Performs a final whole-system Qwen 3.6 review.
+  7. Claude Opus 4.7 performs the final whole-system review.
   8. Finalizes a PR and writes a workflow summary.
 
   NOT for: tiny one-file fixes, quick questions, standalone PR review, or workflows where broad parallel fan-out is desired.
 
 provider: pi
-model: lm-studio/qwen/qwen3.6-27b
+model: lm-studio/qwen2.5-7b-instruct
+interactive: true
 worktree:
   enabled: true
 
@@ -56,7 +58,120 @@ nodes:
     depends_on: [init]
     context: fresh
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b
+    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
+    idle_timeout: 7200000
+    retry:
+      max_attempts: 4
+      delay_ms: 5000
+      on_error: all
+    prompt: |
+      # Borg System Architekt — Draft Architecture Plan
+
+      You are Qwen 3.6 27B acting as the initial planner.
+      Transform the user's request into a draft architecture plan.
+      Do NOT implement code in this node.
+
+      ## User Request
+      $ARGUMENTS
+
+      ## Hard Rules
+      - Plan only. Do not edit source files.
+      - Inspect the codebase deeply enough to avoid fantasy architecture.
+      - Prefer a small number of strong top-level tasks over fragmented micro-tasks.
+      - Preserve existing architecture and patterns.
+      - This is a draft for review, not the final execution task list.
+      - The final executable subtask list will be generated later after review.
+
+      ## Required Artifacts
+      Write `$ARTIFACTS_DIR/architecture-plan.md` with:
+      - Executive summary
+      - Current architecture findings with file references
+      - Target architecture
+      - Draft top-level task breakdown in execution order
+      - Cross-task contracts and sequencing constraints
+      - Risk register
+      - Validation strategy
+      - Rollback/containment notes
+
+      Write `$ARTIFACTS_DIR/plan-outline.md` with:
+      - Proposed task order
+      - Why this decomposition is appropriate
+      - Open trade-offs or assumptions
+      - Areas where a reviewer should challenge the plan
+
+      Do NOT write the final `task-list.json` or task handoff files yet.
+      End with `<promise>DRAFT_ARCHITECTURE_PLAN_COMPLETE</promise>`.
+
+  - id: opus-plan-review
+    depends_on: [architecture-plan]
+    context: fresh
+    provider: claude
+    model: claude-opus-4-7
+    effort: high
+    thinking: enabled
+    idle_timeout: 7200000
+    retry:
+      max_attempts: 3
+      delay_ms: 5000
+      on_error: all
+    prompt: |
+      # Borg System Architekt — Fresh-Context Plan Review
+
+      You are Claude Opus 4.7 reviewing a draft pre-plan from a blank context.
+      Keep context lean: rely only on the user request and the planning artifacts.
+      Do NOT perform broad repo exploration unless absolutely necessary.
+      Do NOT implement code.
+
+      Context budget guidance:
+      - Assume a 128000 token context window.
+      - Preserve roughly 12000 tokens for your response.
+      - Keep effective input under roughly 116000 tokens.
+      - If artifacts are larger than that, prioritize the most decision-relevant sections first and explicitly note any skipped sections in the review.
+
+      ## User Request
+      $ARGUMENTS
+
+      ## Read These Artifacts
+      - `$ARTIFACTS_DIR/architecture-plan.md`
+      - `$ARTIFACTS_DIR/plan-outline.md`
+
+      ## Review Goals
+      - Identify weak assumptions, sequencing risks, or missing constraints.
+      - Challenge over-scoping or under-scoping.
+      - Ask the user only the questions that materially affect implementation.
+      - Recommend how Qwen should revise the plan before execution subtasks are generated.
+
+      Write `$ARTIFACTS_DIR/plan-review.md` with:
+      - Executive review summary
+      - Blocking concerns
+      - Non-blocking suggestions
+      - Explicit questions for the user
+      - Required revisions before implementation planning
+      - Review verdict: APPROVE_WITH_NOTES / NEEDS_REVISION
+      - Input-budget notes if any artifacts had to be partially skipped
+
+      End with `<promise>PLAN_REVIEW_COMPLETE</promise>`.
+
+  - id: review-architecture-plan
+    depends_on: [opus-plan-review]
+    approval:
+      message: |
+        Review the draft plan and Opus review before execution subtasks are generated.
+
+        Read these artifacts:
+        - `$ARTIFACTS_DIR/architecture-plan.md`
+        - `$ARTIFACTS_DIR/plan-outline.md`
+        - `$ARTIFACTS_DIR/plan-review.md`
+
+        Respond with any answers to the Opus questions plus plan feedback.
+        Approve when Qwen should finalize the plan and generate execution subtasks.
+      capture_response: true
+
+  - id: finalize-plan
+    depends_on: [review-architecture-plan]
+    context: fresh
+    provider: claude
+    model: claude-opus-4-7
     effort: high
     thinking: enabled
     idle_timeout: 7200000
@@ -65,37 +180,56 @@ nodes:
       delay_ms: 5000
       on_error: all
     prompt: |
-      # Borg System Architekt — Dynamic Architecture and Task Planning
+      # Borg System Architekt — Finalize Plan After Review
 
-      You are the system architect. Transform the user's request into a safe,
-      task-based implementation plan. Do NOT implement code in this node.
+      You are Claude Opus 4.7 finalizing the plan after Opus review and user feedback.
+      Do NOT implement code in this node.
 
-      ## User Request
-      $ARGUMENTS
+      ## Inputs
+      - User request: `$ARGUMENTS`
+      - Draft plan: `$ARTIFACTS_DIR/architecture-plan.md`
+      - Draft outline: `$ARTIFACTS_DIR/plan-outline.md`
+      - Opus 4.7 review: `$ARTIFACTS_DIR/plan-review.md`
+      - User gate response: `$review-architecture-plan.output`
 
-      ## Hard Rules
-      - Plan only. Do not edit source files.
-      - Inspect the codebase deeply enough to avoid fantasy architecture.
-      - Decide the number of tasks dynamically. Do not force an artificial fixed count.
-      - Prefer fewer, stronger tasks over fragmented micro-tasks.
-      - Tasks must be sequenced so a single fresh-context worker can execute them one by one.
-      - Each task must be self-contained: files to read, files to change, contracts,
-        validation commands, success criteria, and risks.
-      - If two tasks cannot be cleanly separated, merge them.
-      - Preserve existing architecture and patterns.
-      - Implementation later runs on Qwen 3.6 with fresh context per task, so every
-        task handoff must be fully bootstrappable from disk artifacts.
+      ## Required Work
+      - Revise `$ARTIFACTS_DIR/architecture-plan.md` in place.
+      - Resolve the important Opus 4.7 findings and user answers.
+      - Produce a crisp final top-level task breakdown suitable for execution planning.
+      - Write `$ARTIFACTS_DIR/plan-finalization.md` summarizing:
+        - what changed
+        - what remained unchanged
+        - which review items were accepted or intentionally rejected
 
-      ## Required Artifacts
-      Write `$ARTIFACTS_DIR/architecture-plan.md` with:
-      - Executive summary
-      - Current architecture findings with file references
-      - Target architecture
-      - Dynamic task breakdown table in execution order
-      - Cross-task contracts and sequencing constraints
-      - Risk register
-      - Validation strategy
-      - Rollback/containment notes
+      Do NOT write execution subtasks yet.
+      End with `<promise>FINAL_PLAN_READY</promise>`.
+
+  - id: generate-subtasks
+    depends_on: [finalize-plan]
+    context: fresh
+    provider: claude
+    model: claude-opus-4-7
+    effort: high
+    thinking: enabled
+    idle_timeout: 7200000
+    retry:
+      max_attempts: 4
+      delay_ms: 5000
+      on_error: all
+    prompt: |
+      # Borg System Architekt — Generate Sequential Execution Subtasks
+
+      You are Claude Opus 4.7 generating the final execution subtask plan.
+      Do NOT implement code in this node.
+
+      ## Inputs
+      - User request: `$ARGUMENTS`
+      - Final plan: `$ARTIFACTS_DIR/architecture-plan.md`
+      - Plan finalization summary: `$ARTIFACTS_DIR/plan-finalization.md`
+      - Opus 4.7 review: `$ARTIFACTS_DIR/plan-review.md`
+
+      ## Goal
+      Convert the final plan into the executable sequential subtask list used by the worker loop.
 
       Write `$ARTIFACTS_DIR/task-list.json` as valid JSON:
       ```json
@@ -127,6 +261,7 @@ nodes:
       - Create as many tasks as truly needed.
       - Status values start as `pending`.
       - `dependsOn` may be empty, but if present it may only reference earlier tasks.
+      - Prefer fewer, stronger sequential execution subtasks over busywork.
 
       Write one self-contained handoff per task:
       `$ARTIFACTS_DIR/tasks/T01.md`, `$ARTIFACTS_DIR/tasks/T02.md`, ...
@@ -142,10 +277,10 @@ nodes:
       - Done criteria
       - What NOT to do
 
-      End with `<promise>ARCHITECTURE_PLAN_COMPLETE</promise>`.
+      End with `<promise>SUBTASK_PLAN_COMPLETE</promise>`.
 
   - id: verify-plan-artifacts
-    depends_on: [architecture-plan]
+    depends_on: [generate-subtasks]
     bash: |
       set -euo pipefail
       test -s "$ARTIFACTS_DIR/architecture-plan.md"
@@ -183,27 +318,39 @@ nodes:
 
   - id: process-tasks
     depends_on: [verify-plan-artifacts]
+    provider: pi
+    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
     idle_timeout: 7200000
     loop:
       max_iterations: 40
       fresh_context: true
       until: ALL_TASKS_COMPLETE
       until_bash: |
+        # Check if task-list.json exists in the current worktree and all tasks are terminal
+        TASK_FILE="${ARTIFACTS_DIR:-./artifacts}/task-list.json"
+        if [ ! -f "$TASK_FILE" ]; then
+          exit 1  # File not found, continue looping
+        fi
         python3 - << 'PY'
-        import json, os, sys
-        data = json.load(open(os.path.join(os.environ['ARTIFACTS_DIR'], 'task-list.json')))
-        tasks = data.get('tasks', [])
-        if not tasks:
+        import json, sys
+        try:
+            with open(sys.argv[1]) as f:
+                data = json.load(f)
+            tasks = data.get('tasks', [])
+            if not tasks:
+                sys.exit(1)
+            open_statuses = {'pending', 'in_progress', 'reviewing', 'fixing'}
+            if any(task.get('status') in open_statuses for task in tasks):
+                sys.exit(1)
+            sys.exit(0)  # All tasks are terminal
+        except Exception as e:
+            print(f"Error reading tasks: {e}", file=sys.stderr)
             sys.exit(1)
-        open_statuses = {'pending', 'in_progress', 'reviewing', 'fixing'}
-        if any(task.get('status') in open_statuses for task in tasks):
-            sys.exit(1)
-        sys.exit(0)
-        PY
+        PY "$TASK_FILE"
       prompt: |
         # Borg System Architekt — Sequential Dynamic Task Worker
 
-        You are Qwen 3.6 executing exactly one planned task in this iteration.
+        You are Qwen 3.6 27B executing exactly one planned task in this iteration.
         This is a hard context cut. You have no memory except what you read from disk.
 
         ## Core Inputs
@@ -300,7 +447,7 @@ nodes:
     depends_on: [validate]
     context: fresh
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b
+    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
     idle_timeout: 7200000
     retry:
       max_attempts: 4
@@ -309,7 +456,7 @@ nodes:
     prompt: |
       # Borg System Architekt — Final Whole-System Review
 
-      You are Qwen 3.6 as the final reviewer. Start from a blank context and judge the entire implementation.
+      You are Claude Opus 4.7 as the final reviewer. Start from a blank context and judge the entire implementation.
       Be strict, evidence-based, and specific. Do not rubber-stamp.
 
       ## Read These Artifacts
@@ -338,7 +485,7 @@ nodes:
       7. The result is maintainable and simple enough.
       8. No obvious generated-code artifacts, dead code, or accidental broad changes remain.
 
-      Write `$ARTIFACTS_DIR/final/qwen-final-review.md` with:
+      Write `$ARTIFACTS_DIR/final/final-review.md` with:
       - Verdict: PASS / FAIL
       - Executive summary
       - Blocking findings with file:line evidence
@@ -355,7 +502,7 @@ nodes:
     depends_on: [final-system-review]
     context: fresh
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b
+    model: lm-studio/qwen2.5-7b-instruct
     idle_timeout: 7200000
     retry:
       max_attempts: 4
@@ -367,7 +514,7 @@ nodes:
     depends_on: [finalize-pr]
     context: fresh
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b
+    model: lm-studio/qwen2.5-7b-instruct
     idle_timeout: 7200000
     retry:
       max_attempts: 4
