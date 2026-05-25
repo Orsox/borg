@@ -223,3 +223,9 @@ frontend/node_modules/
 frontend/build/
 frontend/dist/
 .archon/workspaces/
+.archon/reset-backups/
+.archon-run-logs/
+.pi/
+.rpiv/
+.tmp_pptx/
+*.pptx

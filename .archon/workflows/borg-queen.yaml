@@ -50,7 +50,7 @@ description: |
   NOT for: Executing existing plans (use archon-plan-to-pr), quick fixes, standalone reviews.
 
 provider: pi
-model: lm-studio/qwen/qwen3.6-27b
+model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
 
 nodes:
   # ═══════════════════════════════════════════════════════════════════
@@ -102,7 +102,7 @@ nodes:
     context: fresh
     # This command may edit dependency/code files; keep it on Qwen, never Opus.
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b
+    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
     idle_timeout: 1800000
 
   - id: confirm-plan
@@ -110,7 +110,7 @@ nodes:
     depends_on: [plan-setup]
     context: fresh
     provider: pi
-    model: lm-studio/google/gemma-4-e4b
+    model: lm-studio/qwen2.5-7b-instruct
     idle_timeout: 1800000
 
   # ═══════════════════════════════════════════════════════════════════
@@ -350,7 +350,7 @@ nodes:
     depends_on: [final-review]
     context: fresh
     provider: pi
-    model: lm-studio/google/gemma-4-e4b
+    model: lm-studio/qwen2.5-7b-instruct
     idle_timeout: 1800000
 
   # ═══════════════════════════════════════════════════════════════════
@@ -362,5 +362,5 @@ nodes:
     depends_on: [finalize-pr]
     context: fresh
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b
+    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
     idle_timeout: 1800000

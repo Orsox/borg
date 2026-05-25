@@ -1,8 +1,14 @@
 """Tests for the archon_system module."""
 
+import json
+
 import pytest
 from httpx import AsyncClient, ASGITransport
 from unittest.mock import AsyncMock, patch, MagicMock
+from sqlalchemy import select
+
+from app.database import AsyncSessionLocal
+from app.second_brain.action_models import ActionMemory
 
 
 @pytest.fixture
@@ -102,6 +108,16 @@ async def test_runs_endpoint(auth_headers):
             data = response.json()
             assert "items" in data
             assert data["total"] >= 0
+
+    async with AsyncSessionLocal() as db:
+        action = (
+            await db.execute(
+                select(ActionMemory).where(ActionMemory.source_kind == "archon_run")
+            )
+        ).scalar_one()
+        assert action.source_ref == "run-123"
+        assert action.status == "in_progress"
+        assert "Current Archon status: running." in action.description
 
 
 @pytest.mark.asyncio
@@ -254,3 +270,174 @@ async def test_health_fallback_no_cached_data(auth_headers):
             data = response.json()
             assert data["online"] is False
             assert data["cached"] is True
+
+
+@pytest.mark.asyncio
+async def test_failed_run_errors_are_searchable_in_action_memory(auth_headers):
+    """Failed Archon runs are mirrored into Action Memory with searchable error text."""
+    from app.main import app
+    from app.archon_system.client import ArchonClient
+
+    mock_client = AsyncMock(spec=ArchonClient)
+    mock_client.get_runs = AsyncMock(return_value=[
+        {
+            "id": "run-failed-1",
+            "workflow_name": "borg-system-architekt",
+            "status": "failed",
+            "user_message": "implement action memory logging",
+            "error": "final review model resolution failed",
+            "started_at": "2026-01-01T00:00:00Z",
+            "completed_at": "2026-01-01T00:05:00Z",
+        }
+    ])
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("app.archon_system.service.ArchonClient", return_value=mock_client):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/api/archon-system/runs", headers=auth_headers)
+            assert response.status_code == 200
+
+            response = await client.get(
+                "/api/brain/actions?search=model%20resolution%20failed",
+                headers=auth_headers,
+            )
+            assert response.status_code == 200
+            data = response.json()
+            assert data["total"] == 1
+            assert data["items"][0]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_metadata_error_is_extracted(auth_headers):
+    """Real Archon payloads nest the failure under metadata.error — it must be captured."""
+    from app.main import app
+    from app.archon_system.client import ArchonClient
+
+    error_text = (
+        "DAG workflow 'borg-system-architekt' completed with failures: "
+        "'process-tasks': Loop iteration 3 failed: SDK returned error — LM Link connection entered error"
+    )
+    mock_client = AsyncMock(spec=ArchonClient)
+    mock_client.get_runs = AsyncMock(return_value=[
+        {
+            "id": "run-meta-error",
+            "workflow_name": "borg-system-architekt",
+            "status": "failed",
+            "user_message": "implement action memory logging",
+            "metadata": {"error": error_text, "rejection_reason": ""},
+        }
+    ])
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("app.archon_system.service.ArchonClient", return_value=mock_client):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/api/archon-system/runs", headers=auth_headers)
+            assert response.status_code == 200
+
+    async with AsyncSessionLocal() as db:
+        action = (
+            await db.execute(
+                select(ActionMemory).where(ActionMemory.source_ref == "run-meta-error")
+            )
+        ).scalar_one()
+        assert action.status == "failed"
+        assert error_text in action.description
+        meta = json.loads(action.metadata_json)
+        assert error_text in meta["errors"]
+        assert meta["archon_metadata"]["error"] == error_text
+        assert "has-errors" in action.tags
+
+
+@pytest.mark.asyncio
+async def test_small_error_on_successful_run_is_flagged(auth_headers):
+    """A non-fatal error (agents_failed) on an otherwise successful run is still flagged."""
+    from app.main import app
+    from app.archon_system.client import ArchonClient
+
+    mock_client = AsyncMock(spec=ArchonClient)
+    mock_client.get_runs = AsyncMock(return_value=[
+        {
+            "id": "run-small-error",
+            "workflow_name": "borg-nanoprobe",
+            "status": "completed",
+            "agents_failed": 1,
+            "agents_total": 4,
+            "agents_completed": 3,
+        }
+    ])
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("app.archon_system.service.ArchonClient", return_value=mock_client):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/api/archon-system/runs", headers=auth_headers)
+            assert response.status_code == 200
+
+            response = await client.get(
+                "/api/brain/actions?search=has-errors", headers=auth_headers
+            )
+            assert response.status_code == 200
+            data = response.json()
+            assert data["total"] == 1
+
+    async with AsyncSessionLocal() as db:
+        action = (
+            await db.execute(
+                select(ActionMemory).where(ActionMemory.source_ref == "run-small-error")
+            )
+        ).scalar_one()
+        # Lifecycle status stays truthful (run completed), but the error is surfaced.
+        assert action.status == "success"
+        assert "has-errors" in action.tags
+        assert '"has_errors": true' in action.metadata_json
+        assert "Failed agents: 1" in action.description
+
+
+@pytest.mark.asyncio
+async def test_errors_accumulate_across_syncs(auth_headers):
+    """Errors from earlier syncs are preserved when a later sync reports different errors."""
+    from app.main import app
+    from app.archon_system.client import ArchonClient
+
+    error_1 = "Loop iteration 1 failed: transient network error"
+    error_2 = "Loop iteration 3 failed: SDK returned error — timeout"
+    mock_client = AsyncMock(spec=ArchonClient)
+    mock_client.get_runs = AsyncMock(side_effect=[
+        [{
+            "id": "run-accumulate",
+            "workflow_name": "borg-queen",
+            "status": "running",
+            "metadata": {"error": error_1},
+        }],
+        [{
+            "id": "run-accumulate",
+            "workflow_name": "borg-queen",
+            "status": "failed",
+            "metadata": {"error": error_2},
+        }],
+    ])
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("app.archon_system.service.ArchonClient", return_value=mock_client):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            assert (await client.get("/api/archon-system/runs", headers=auth_headers)).status_code == 200
+            assert (await client.get("/api/archon-system/runs", headers=auth_headers)).status_code == 200
+
+    async with AsyncSessionLocal() as db:
+        action = (
+            await db.execute(
+                select(ActionMemory).where(ActionMemory.source_ref == "run-accumulate")
+            )
+        ).scalar_one()
+        meta = json.loads(action.metadata_json)
+        assert error_1 in meta["errors"]
+        assert error_2 in meta["errors"]
+        assert error_1 in action.description
+        assert error_2 in action.description

@@ -102,3 +102,31 @@ export async function getBacklinks(id: number): Promise<BacklinkItem[]> {
 export async function getKnowledgeGraph(): Promise<KnowledgeGraph> {
 	return apiFetch<KnowledgeGraph>('/brain/graph');
 }
+
+// --- Combined graph (vault + DB notes + action memory) ---
+export type GraphSource = 'vault' | 'note' | 'action';
+
+export interface CombinedGraphNode {
+	id: string;
+	title: string;
+	source: GraphSource;
+	kind: string;
+	tags: string[];
+	backlink_count: number;
+	ref: string;
+}
+
+export interface CombinedGraphEdge {
+	source: string;
+	target: string;
+}
+
+export interface CombinedGraph {
+	nodes: CombinedGraphNode[];
+	edges: CombinedGraphEdge[];
+}
+
+export async function getCombinedGraph(linkTags = false): Promise<CombinedGraph> {
+	const params = linkTags ? '?link_tags=true' : '';
+	return apiFetch<CombinedGraph>(`/brain/graph/combined${params}`);
+}

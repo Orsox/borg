@@ -68,3 +68,23 @@ class GraphEdge(BaseModel):
 class KnowledgeGraph(BaseModel):
     nodes: list[GraphNode]
     edges: list[GraphEdge]
+
+
+class CombinedGraphNode(BaseModel):
+    id: str            # namespaced: "vault:<rel_path>" | "note:<int>" | "action:<int>"
+    title: str
+    source: str        # "vault" | "note" | "action"
+    kind: str          # NoteKind value (vault) | "db-note" (note) | status (action)
+    tags: list[str]
+    backlink_count: int
+    ref: str           # rel_path (vault) or str(id) (note/action) — used to open the node
+
+
+class CombinedGraphEdge(BaseModel):
+    source: str
+    target: str
+
+
+class CombinedGraph(BaseModel):
+    nodes: list[CombinedGraphNode]
+    edges: list[CombinedGraphEdge]
