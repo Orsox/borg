@@ -1,0 +1,629 @@
+# ═════════════════════════════════════════════════════════════════════
+# Borg Sanitizer — Modul-Dokumentations-Enforcer
+# ═════════════════════════════════════════════════════════════════════
+#
+# Sichert, dass jedes Code-Modul zwei Pflicht-Dateien hat:
+#   CLAUDE.md       → Regelwerk für Coding-Agenten (Claude Code / Pi)
+#   borg-cube.md    → Spezifikation des Moduls / Bereichs
+#
+# Referenz: https://claude.com/blog/how-claude-code-works-in-large-codebases-best-practices-and-where-to-start
+#
+# Model-Routing (lokal-first, Review-only-Claude):
+#   qwen2.5-7b-instruct (lokal) → bis zu 4 parallele Analyse-Subagenten
+#                                  (idle_timeout 5 min, kleines Modell, VRAM-schonend)
+#   qwen3.6-27b         (lokal) → Dokumentation generieren, sequenziell
+#                                  (idle_timeout 10 min, grosses Modell, nur 1 Instanz)
+#   Claude Sonnet               → AUSSCHLIESSLICH abschliessende Quality-Review
+#
+# Architektur-Entscheidung:
+#   Kein Loop-Node — Loops erben den Workflow-Default und ignorieren node-level
+#   model/provider; LM-Studio timeouted intern bei schweren Loop-Iterationen.
+#   Stattdessen: deterministisches Sharding (bash) → parallele qwen2.5-Analyse
+#   → ein qwen3.6-Generierungspass aus vorverdauten Analysen. Das hält jeden
+#   einzelnen Node leicht und unterhalb der LM-Studio-Timeouts.
+# ═════════════════════════════════════════════════════════════════════
+
+name: borg-sanitizer
+description: |
+  Ensure every code module has CLAUDE.md (agent rules) and borg-cube.md (module spec).
+
+  Use when: "borg sanitizer", "sanitize docs", "ensure CLAUDE.md", "add module docs",
+            "generate borg-cube", "add agent rules", "sanitize modules", "run sanitizer",
+            "check module docs", "enforce documentation".
+
+  Does:
+  1. Scans the repo for all code modules and splits them into 4 shards (deterministic bash).
+  2. Up to 4 parallel qwen2.5-7b analysis subagents read their shard and write factual
+     per-module analyses (purpose, public API, data models, deps, config, pitfalls).
+  3. A single sequential qwen3.6-27b pass writes the missing CLAUDE.md / borg-cube.md
+     files from the pre-computed analyses.
+  4. Claude Sonnet performs the final quality-review (the only Claude usage).
+  5. Reports what was created.
+
+  CLAUDE.md  — Agent rules: build commands, conventions, architecture decisions,
+               pitfalls, integration points. Concise, module-specific only.
+  borg-cube.md — Module spec: purpose, public API, data models, config, dependencies.
+
+  Reference: https://claude.com/blog/how-claude-code-works-in-large-codebases-best-practices-and-where-to-start
+
+  NOT for: generating the root CLAUDE.md (already handled by /init), deleting files,
+           modifying existing documentation.
+
+provider: pi
+model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
+worktree:
+  enabled: true
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 0: INIT
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: init
+    bash: |
+      set -euo pipefail
+      mkdir -p "$ARTIFACTS_DIR/modules" \
+               "$ARTIFACTS_DIR/analysis" \
+               "$ARTIFACTS_DIR/review" \
+               "$ARTIFACTS_DIR/final"
+      echo "Borg Sanitizer initialized at $ARTIFACTS_DIR"
+    timeout: 10000
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 1: MODUL-SCAN + SHARDING — deterministisch, kein KI
+  #
+  # Findet Module, ermittelt fehlende Doku-Dateien, vergibt einen Slug
+  # (sicherer Dateiname) und einen Shard (0..3) pro Modul, und schreibt
+  # eine shard-K.json pro Analyse-Subagent.
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: scan-modules
+    depends_on: [init]
+    bash: |
+      set -euo pipefail
+
+      python3 - << 'PY'
+      import json, os, pathlib, re
+
+      ROOT = pathlib.Path(".")
+      ART = os.environ["ARTIFACTS_DIR"]
+      NUM_SHARDS = 4
+
+      # Verzeichnisse, die nie als Module gelten
+      EXCLUDE_DIRS = {
+          "__pycache__", "node_modules", ".git", ".venv", "venv",
+          ".svelte-kit", "build", "dist", ".pytest_cache",
+          "workspaces", "reset-backups", "run-logs", "logs",
+          ".rpiv", ".pi",
+      }
+      # Versteckte Verzeichnisse (Ausnahmen: Root-Level .archon/.claude sind ok als Roots)
+      EXCLUDE_PREFIXES = (".archon", ".claude", ".agent")
+
+      CODE_EXT = {".py", ".ts", ".svelte", ".js"}
+      MIN_CODE_FILES = 2  # mind. 2 Code-Dateien (ausser __init__.py)
+
+      def is_excluded_path(rel: pathlib.Path) -> bool:
+          for part in rel.parts:
+              if part in EXCLUDE_DIRS:
+                  return True
+              if any(part.startswith(pf) and part != pf for pf in EXCLUDE_PREFIXES):
+                  return True
+          return False
+
+      def code_file_count(directory: pathlib.Path) -> int:
+          try:
+              return sum(
+                  1 for f in directory.iterdir()
+                  if f.is_file()
+                  and f.suffix in CODE_EXT
+                  and f.name not in ("__init__.py",)
+              )
+          except PermissionError:
+              return 0
+
+      candidates = []
+
+      # 1. Python-Pakete
+      for d in sorted(ROOT.rglob("__init__.py")):
+          pkg_dir = d.parent
+          rel = pkg_dir.relative_to(ROOT)
+          if is_excluded_path(rel):
+              continue
+          if code_file_count(pkg_dir) < MIN_CODE_FILES:
+              continue
+          candidates.append((str(rel), "python_package"))
+
+      # 2. Top-Level-Bereiche: backend/, frontend/
+      for name in ("backend", "frontend"):
+          d = ROOT / name
+          if d.is_dir() and code_file_count(d) >= 1:
+              rel = pathlib.Path(name)
+              if not is_excluded_path(rel):
+                  candidates.append((name, "top_level"))
+
+      # 3. Wichtige Frontend-Unterverzeichnisse (max. Tiefe 4 unter frontend/src)
+      frontend_src = ROOT / "frontend" / "src"
+      if frontend_src.is_dir():
+          for d in sorted(frontend_src.rglob("*")):
+              if not d.is_dir():
+                  continue
+              rel = d.relative_to(ROOT)
+              if is_excluded_path(rel):
+                  continue
+              if len(rel.parts) > 4:
+                  continue
+              if code_file_count(d) >= MIN_CODE_FILES:
+                  candidates.append((str(rel), "frontend"))
+
+      # Deduplizieren + Fehlende ermitteln
+      seen = set()
+      modules = []
+      for path_str, kind in candidates:
+          if path_str in seen:
+              continue
+          seen.add(path_str)
+          d = ROOT / path_str
+          missing_claude = not (d / "CLAUDE.md").exists()
+          missing_cube   = not (d / "borg-cube.md").exists()
+          if missing_claude or missing_cube:
+              modules.append({
+                  "path":           path_str,
+                  "type":           kind,
+                  "missing_claude": missing_claude,
+                  "missing_cube":   missing_cube,
+              })
+
+      # Slug + Shard vergeben
+      for i, m in enumerate(modules):
+          m["slug"]  = re.sub(r"[^A-Za-z0-9]+", "__", m["path"]).strip("_")
+          m["shard"] = i % NUM_SHARDS
+
+      manifest = {"modules": modules, "total": len(modules), "num_shards": NUM_SHARDS}
+      with open(f"{ART}/modules/manifest.json", "w") as f:
+          json.dump(manifest, f, indent=2)
+
+      # Pro-Shard-Dateien schreiben (auch leere — die Subagenten erkennen das)
+      for k in range(NUM_SHARDS):
+          shard_mods = [m for m in modules if m["shard"] == k]
+          with open(f"{ART}/modules/shard-{k}.json", "w") as f:
+              json.dump({"shard": k, "modules": shard_mods}, f, indent=2)
+
+      if modules:
+          print(f"Found {len(modules)} module(s) needing documentation:\n")
+          for m in modules:
+              missing = []
+              if m["missing_claude"]: missing.append("CLAUDE.md")
+              if m["missing_cube"]:   missing.append("borg-cube.md")
+              print(f"  [shard {m['shard']}] {m['path']}  →  missing: {', '.join(missing)}")
+      else:
+          print("All modules already have CLAUDE.md and borg-cube.md. Nothing to do.")
+      PY
+    timeout: 30000
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 2: PARALLELE ANALYSE — 4× qwen2.5-7b-instruct (Subagenten)
+  #
+  # Alle 4 Nodes laufen in derselben DAG-Layer → echte Parallelität.
+  # Kleines Modell, simple und konkrete Instruktionen, 5-min idle_timeout.
+  # Leere Shards (weniger als 4 Module) werden sauber übersprungen.
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: analyze-shard-0
+    depends_on: [scan-modules]
+    context: fresh
+    provider: pi
+    model: lm-studio/qwen2.5-7b-instruct
+    idle_timeout: 300000
+    prompt: |
+      # Borg Sanitizer — Code Analysis (Shard 0)
+
+      You are a code analyst subagent. Analyze ONLY the modules assigned to you and
+      write one factual analysis file per module. Describe only what you actually read.
+
+      ## Step 1 — Read your assignment
+      Read `$ARTIFACTS_DIR/modules/shard-0.json`. It contains a `modules` list; each
+      entry has: `path`, `slug`, `type`, `missing_claude`, `missing_cube`.
+
+      If the `modules` list is empty: write `$ARTIFACTS_DIR/analysis/shard-0-empty.txt`
+      with the text `no modules in this shard` and finish immediately.
+
+      ## Step 2 — Analyze each module
+      For EACH module, using its `path`:
+      - List the files directly inside `<path>` (do NOT recurse into subdirectories).
+      - Read the `.py`, `.ts`, `.svelte`, and `.yaml` files there.
+      - Write `$ARTIFACTS_DIR/analysis/<slug>.md` with EXACTLY these sections:
+
+        # Analysis: <path>
+
+        ## Purpose
+        2-3 sentences on what this module does.
+
+        ## Public API
+        Exported functions, classes, and HTTP routes — with signatures.
+
+        ## Data Models
+        Key SQLAlchemy models or TypeScript types defined here.
+
+        ## Dependencies
+        What this module imports from other project modules; what calls it if visible.
+
+        ## Configuration
+        Env vars or settings this module reads. Write "none" if none.
+
+        ## Commands
+        Module-specific build/test/lint commands. Write "inherits root" if none.
+
+        ## Conventions and Pitfalls
+        Patterns and gotchas observed in the code.
+
+      ## Step 3 — Finish
+      After all your modules are analyzed, end with: <promise>SHARD_0_ANALYZED</promise>
+
+  - id: analyze-shard-1
+    depends_on: [scan-modules]
+    context: fresh
+    provider: pi
+    model: lm-studio/qwen2.5-7b-instruct
+    idle_timeout: 300000
+    prompt: |
+      # Borg Sanitizer — Code Analysis (Shard 1)
+
+      You are a code analyst subagent. Analyze ONLY the modules assigned to you and
+      write one factual analysis file per module. Describe only what you actually read.
+
+      ## Step 1 — Read your assignment
+      Read `$ARTIFACTS_DIR/modules/shard-1.json`. It contains a `modules` list; each
+      entry has: `path`, `slug`, `type`, `missing_claude`, `missing_cube`.
+
+      If the `modules` list is empty: write `$ARTIFACTS_DIR/analysis/shard-1-empty.txt`
+      with the text `no modules in this shard` and finish immediately.
+
+      ## Step 2 — Analyze each module
+      For EACH module, using its `path`:
+      - List the files directly inside `<path>` (do NOT recurse into subdirectories).
+      - Read the `.py`, `.ts`, `.svelte`, and `.yaml` files there.
+      - Write `$ARTIFACTS_DIR/analysis/<slug>.md` with EXACTLY these sections:
+
+        # Analysis: <path>
+
+        ## Purpose
+        2-3 sentences on what this module does.
+
+        ## Public API
+        Exported functions, classes, and HTTP routes — with signatures.
+
+        ## Data Models
+        Key SQLAlchemy models or TypeScript types defined here.
+
+        ## Dependencies
+        What this module imports from other project modules; what calls it if visible.
+
+        ## Configuration
+        Env vars or settings this module reads. Write "none" if none.
+
+        ## Commands
+        Module-specific build/test/lint commands. Write "inherits root" if none.
+
+        ## Conventions and Pitfalls
+        Patterns and gotchas observed in the code.
+
+      ## Step 3 — Finish
+      After all your modules are analyzed, end with: <promise>SHARD_1_ANALYZED</promise>
+
+  - id: analyze-shard-2
+    depends_on: [scan-modules]
+    context: fresh
+    provider: pi
+    model: lm-studio/qwen2.5-7b-instruct
+    idle_timeout: 300000
+    prompt: |
+      # Borg Sanitizer — Code Analysis (Shard 2)
+
+      You are a code analyst subagent. Analyze ONLY the modules assigned to you and
+      write one factual analysis file per module. Describe only what you actually read.
+
+      ## Step 1 — Read your assignment
+      Read `$ARTIFACTS_DIR/modules/shard-2.json`. It contains a `modules` list; each
+      entry has: `path`, `slug`, `type`, `missing_claude`, `missing_cube`.
+
+      If the `modules` list is empty: write `$ARTIFACTS_DIR/analysis/shard-2-empty.txt`
+      with the text `no modules in this shard` and finish immediately.
+
+      ## Step 2 — Analyze each module
+      For EACH module, using its `path`:
+      - List the files directly inside `<path>` (do NOT recurse into subdirectories).
+      - Read the `.py`, `.ts`, `.svelte`, and `.yaml` files there.
+      - Write `$ARTIFACTS_DIR/analysis/<slug>.md` with EXACTLY these sections:
+
+        # Analysis: <path>
+
+        ## Purpose
+        2-3 sentences on what this module does.
+
+        ## Public API
+        Exported functions, classes, and HTTP routes — with signatures.
+
+        ## Data Models
+        Key SQLAlchemy models or TypeScript types defined here.
+
+        ## Dependencies
+        What this module imports from other project modules; what calls it if visible.
+
+        ## Configuration
+        Env vars or settings this module reads. Write "none" if none.
+
+        ## Commands
+        Module-specific build/test/lint commands. Write "inherits root" if none.
+
+        ## Conventions and Pitfalls
+        Patterns and gotchas observed in the code.
+
+      ## Step 3 — Finish
+      After all your modules are analyzed, end with: <promise>SHARD_2_ANALYZED</promise>
+
+  - id: analyze-shard-3
+    depends_on: [scan-modules]
+    context: fresh
+    provider: pi
+    model: lm-studio/qwen2.5-7b-instruct
+    idle_timeout: 300000
+    prompt: |
+      # Borg Sanitizer — Code Analysis (Shard 3)
+
+      You are a code analyst subagent. Analyze ONLY the modules assigned to you and
+      write one factual analysis file per module. Describe only what you actually read.
+
+      ## Step 1 — Read your assignment
+      Read `$ARTIFACTS_DIR/modules/shard-3.json`. It contains a `modules` list; each
+      entry has: `path`, `slug`, `type`, `missing_claude`, `missing_cube`.
+
+      If the `modules` list is empty: write `$ARTIFACTS_DIR/analysis/shard-3-empty.txt`
+      with the text `no modules in this shard` and finish immediately.
+
+      ## Step 2 — Analyze each module
+      For EACH module, using its `path`:
+      - List the files directly inside `<path>` (do NOT recurse into subdirectories).
+      - Read the `.py`, `.ts`, `.svelte`, and `.yaml` files there.
+      - Write `$ARTIFACTS_DIR/analysis/<slug>.md` with EXACTLY these sections:
+
+        # Analysis: <path>
+
+        ## Purpose
+        2-3 sentences on what this module does.
+
+        ## Public API
+        Exported functions, classes, and HTTP routes — with signatures.
+
+        ## Data Models
+        Key SQLAlchemy models or TypeScript types defined here.
+
+        ## Dependencies
+        What this module imports from other project modules; what calls it if visible.
+
+        ## Configuration
+        Env vars or settings this module reads. Write "none" if none.
+
+        ## Commands
+        Module-specific build/test/lint commands. Write "inherits root" if none.
+
+        ## Conventions and Pitfalls
+        Patterns and gotchas observed in the code.
+
+      ## Step 3 — Finish
+      After all your modules are analyzed, end with: <promise>SHARD_3_ANALYZED</promise>
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 3: GENERIERUNG — qwen3.6-27b, sequenziell, ein Pass
+  #
+  # all_done: läuft sobald alle Shards terminal sind (auch bei Shard-Timeout),
+  #           arbeitet mit den vorhandenen Analysen. Fehlende Analysen werden
+  #           notfalls direkt aus dem Quellcode nachgelesen.
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: generate-docs
+    depends_on: [analyze-shard-0, analyze-shard-1, analyze-shard-2, analyze-shard-3]
+    trigger_rule: all_done
+    context: fresh
+    provider: pi
+    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
+    idle_timeout: 600000
+    prompt: |
+      # Borg Sanitizer — Modul-Dokumentation generieren
+
+      Du bist Qwen3.6. Du schreibst die finalen CLAUDE.md- und borg-cube.md-Dateien
+      für jedes Modul. Arbeite primär aus den vorberechneten Analysen; öffne den
+      Quellcode nur, wenn eine Analyse fehlt oder unklar ist.
+
+      ## Schritt 1 — Plan laden
+      Lies `$ARTIFACTS_DIR/modules/manifest.json`. Pro Modul bekommst du:
+      `path`, `slug`, `missing_claude`, `missing_cube`.
+
+      Lies pro Modul die Analyse aus `$ARTIFACTS_DIR/analysis/<slug>.md`.
+      Existiert diese Datei nicht, lies kurz selbst den Modul-Quellcode.
+
+      Lies einmal die Root-`CLAUDE.md` für den Projekt-Gesamtkontext.
+
+      ## Schritt 2 — Dateien schreiben
+
+      ### CLAUDE.md  (nur wenn `missing_claude` true) → schreibe `<path>/CLAUDE.md`
+
+      Pflicht-Header:
+      ```
+      # CLAUDE.md — <Modul-Name>
+
+      This file provides guidance to Claude Code (claude.ai/code) and Pi agents
+      working in this module.
+      ```
+
+      Inhalts-Regeln (Referenz: Claude Code best practices für grosse Codebasen):
+      - **Befehle**: modul-spezifische Build-, Test-, Lint-Kommandos
+      - **Konventionen**: Coding-Stil, Namensgebung, Patterns die dieses Modul nutzt
+      - **Architektur**: Schlüssel-Entscheidungen (das WARUM, nicht das WAS)
+      - **Fallgruben**: bekannte Pitfalls, was man vermeiden muss
+      - **Integrationspunkte**: was ruft dieses Modul, was ruft es auf
+      - **Invarianten**: nicht-offensichtliche Voraussetzungen
+
+      Was NICHT hinein gehört: allgemeine Best Practices, Wiederholung der
+      Root-CLAUDE.md, Triviales, Sicherheits-Platitüden. Länge: 30–80 Zeilen.
+
+      ### borg-cube.md  (nur wenn `missing_cube` true) → schreibe `<path>/borg-cube.md`
+
+      Pflicht-Header:
+      ```
+      # <Modul-Name> — Borg Cube Specification
+      ```
+
+      Pflicht-Sektionen:
+      - **Purpose**: Was dieses Modul tut (ein Absatz)
+      - **Public API / Interface**: Routen, exportierte Funktionen, Klassen
+      - **Data Models**: wichtige SQLAlchemy-Modelle oder TypeScript-Typen
+      - **Dependencies**: Was dieses Modul aufruft / wer es aufruft
+      - **Configuration**: Env-Vars, Settings die es liest
+      - **Design Decisions**: nicht-offensichtliche Architekturentscheidungen
+
+      Länge: 40–120 Zeilen.
+
+      ## Schritt 3 — Abschluss
+      Bearbeite JEDES Modul im Manifest. Erstelle keine Datei, die bereits existiert
+      (`missing_*` false). Beende mit `<promise>BORG_SANITIZER_GENERATED</promise>`.
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 4: GIT-STATUS — deterministisch
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: collect-diff
+    depends_on: [generate-docs]
+    bash: |
+      set -euo pipefail
+      OUT="$ARTIFACTS_DIR/review/diff.md"
+      echo "# Generated Files — Diff" > "$OUT"
+      echo >> "$OUT"
+      echo "## Git Status" >> "$OUT"
+      echo '```' >> "$OUT"
+      git status --short >> "$OUT" || true
+      echo '```' >> "$OUT"
+      echo >> "$OUT"
+      echo "## Created Documentation Files" >> "$OUT"
+      git ls-files --others --exclude-standard | grep -E '(CLAUDE|borg-cube)\.md$' | while read -r f; do
+        echo "- $f" >> "$OUT"
+      done
+      git diff --name-only | grep -E '(CLAUDE|borg-cube)\.md$' | while read -r f; do
+        echo "- $f (modified)" >> "$OUT"
+      done
+      cat "$OUT"
+    timeout: 30000
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 5: FINAL REVIEW — Claude Sonnet (einzige Claude-Nutzung)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: final-review
+    depends_on: [collect-diff]
+    context: fresh
+    provider: claude
+    model: sonnet
+    effort: high
+    idle_timeout: 900000
+    prompt: |
+      # Borg Sanitizer — Final Review
+
+      Du bist der finale Reviewer. Prüfe die generierten Dokumentationsdateien
+      auf Qualität und Korrektheit. Dies ist die einzige Claude-Stufe.
+
+      ## Kontext laden
+      - `$ARTIFACTS_DIR/review/diff.md` — welche Dateien erstellt wurden
+      - Lies alle neu erstellten `CLAUDE.md`- und `borg-cube.md`-Dateien
+        (`git ls-files --others --exclude-standard` und `git diff --name-only`)
+      - Root-`CLAUDE.md` für den Vergleich
+      - Stichprobe: lies 1–2 zugehörige Quelldateien, um die Genauigkeit zu prüfen
+
+      ## Review-Kriterien
+      ### CLAUDE.md
+      - Korrekter Header? Modul-spezifisch statt generisch?
+      - Wiederholt nicht die Root-CLAUDE.md?
+      - Konkrete Befehle / Konventionen / Pitfalls? Unter 100 Zeilen?
+      ### borg-cube.md
+      - Korrekter Header? Alle Pflicht-Sektionen?
+      - Public API korrekt? Dependencies vollständig? Faktisch korrekt?
+
+      ## Findings beheben
+      Wenn eine Datei mangelhaft ist (falsche Struktur, fehlende Sektionen,
+      generischer oder falscher Inhalt): verbessere sie direkt.
+
+      ## Review-Bericht schreiben
+      Schreibe `$ARTIFACTS_DIR/review/final-review.md` mit:
+      - Geprüfte Dateien
+      - Verdict pro Datei: GOOD / IMPROVED / SKIPPED
+      - Liste der Verbesserungen
+      - Empfehlungen für manuelle Nacharbeit
+
+      Beende mit `<promise>BORG_SANITIZER_REVIEWED</promise>`.
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 6: ZUSAMMENFASSUNG
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: summary
+    depends_on: [final-review]
+    bash: |
+      set -euo pipefail
+
+      python3 - << 'PY'
+      import json, os, pathlib, datetime
+
+      ART = os.environ["ARTIFACTS_DIR"]
+      ROOT = pathlib.Path(".")
+      manifest_path = os.path.join(ART, "modules", "manifest.json")
+
+      lines = [
+          "# Borg Sanitizer — Summary",
+          "",
+          f"Run: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
+          "",
+      ]
+
+      if not os.path.exists(manifest_path):
+          lines.append("No manifest found — nothing was processed.")
+      else:
+          manifest = json.load(open(manifest_path))
+          modules = manifest.get("modules", [])
+          lines.append(f"Modules scanned: {manifest.get('total', 0)}")
+          lines.append("")
+
+          created, still_missing = [], []
+          for m in modules:
+              d = ROOT / m["path"]
+              made, miss = [], []
+              if m.get("missing_claude"):
+                  (made if (d / "CLAUDE.md").exists() else miss).append("CLAUDE.md")
+              if m.get("missing_cube"):
+                  (made if (d / "borg-cube.md").exists() else miss).append("borg-cube.md")
+              if made:
+                  created.append(f"  - `{m['path']}`: {', '.join(made)}")
+              if miss:
+                  still_missing.append(f"  - `{m['path']}`: {', '.join(miss)} — STILL MISSING")
+
+          if created:
+              lines.append(f"## Created ({len(created)})")
+              lines.extend(created)
+              lines.append("")
+          if still_missing:
+              lines.append(f"## Still Missing ({len(still_missing)})")
+              lines.extend(still_missing)
+              lines.append("")
+          else:
+              lines.append("## Status: ALL MODULES DOCUMENTED")
+
+      review_path = os.path.join(ART, "review", "final-review.md")
+      if os.path.exists(review_path):
+          lines.append("")
+          lines.append("---")
+          lines.append("## Review Report")
+          lines.append(open(review_path).read())
+
+      report = "\n".join(lines)
+      with open(os.path.join(ART, "final", "summary.md"), "w") as f:
+          f.write(report)
+      print(report)
+      PY
+    timeout: 30000
