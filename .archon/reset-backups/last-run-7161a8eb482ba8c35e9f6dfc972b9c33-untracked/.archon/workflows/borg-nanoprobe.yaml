@@ -44,7 +44,7 @@ description: |
   NOT for: broad greenfield features without a GitHub issue, architecture-only reviews, or long multi-epic projects.
 
 provider: pi
-model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
+model: lm-studio/qwen/qwen3.6-27b
 worktree:
   enabled: true
 
@@ -115,7 +115,7 @@ nodes:
     depends_on: [fetch-issue]
     context: fresh
     provider: pi
-    model: lm-studio/qwen2.5-7b-instruct
+    model: lm-studio/google/gemma-4-e4b
     idle_timeout: 600000
     allowed_tools: []
     prompt: |
@@ -215,7 +215,7 @@ nodes:
     depends_on: [repo-scan]
     context: fresh
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
+    model: lm-studio/qwen/qwen3.6-27b
     idle_timeout: 1200000
     prompt: |
       # Borg Nanoprobe — Qwen Bug Triage
@@ -427,7 +427,7 @@ nodes:
     depends_on: [verify-plan]
     context: fresh
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
+    model: lm-studio/qwen/qwen3.6-27b
     idle_timeout: 1800000
     prompt: |
       # Borg Nanoprobe — Qwen Implementation
@@ -535,7 +535,7 @@ nodes:
     depends_on: [validate]
     context: fresh
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
+    model: lm-studio/qwen/qwen3.6-27b
     idle_timeout: 1800000
     prompt: |
       # Borg Nanoprobe — Fix Validation Failures
@@ -614,7 +614,7 @@ nodes:
     depends_on: [revalidate]
     context: fresh
     provider: pi
-    model: lm-studio/qwen2.5-7b-instruct
+    model: lm-studio/google/gemma-4-e4b
     idle_timeout: 900000
     prompt: |
       # Borg Nanoprobe — Scope Review
@@ -640,7 +640,7 @@ nodes:
     depends_on: [revalidate]
     context: fresh
     provider: pi
-    model: lm-studio/qwen2.5-7b-instruct
+    model: lm-studio/google/gemma-4-e4b
     idle_timeout: 900000
     prompt: |
       # Borg Nanoprobe — Error Handling Review
@@ -672,7 +672,7 @@ nodes:
     depends_on: [revalidate]
     context: fresh
     provider: pi
-    model: lm-studio/qwen2.5-7b-instruct
+    model: lm-studio/google/gemma-4-e4b
     idle_timeout: 900000
     prompt: |
       # Borg Nanoprobe — Test Gap Review
@@ -704,7 +704,7 @@ nodes:
     depends_on: [revalidate]
     context: fresh
     provider: pi
-    model: lm-studio/qwen2.5-7b-instruct
+    model: lm-studio/google/gemma-4-e4b
     idle_timeout: 900000
     prompt: |
       # Borg Nanoprobe — Frontend UX Review
@@ -770,7 +770,7 @@ nodes:
     depends_on: [synthesize-reviews]
     context: fresh
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
+    model: lm-studio/qwen/qwen3.6-27b
     idle_timeout: 1800000
     prompt: |
       # Borg Nanoprobe — Qwen Review Fixes
@@ -883,7 +883,7 @@ nodes:
     depends_on: [final-review]
     context: fresh
     provider: pi
-    model: lm-studio/qwen2.5-7b-instruct
+    model: lm-studio/google/gemma-4-e4b
     idle_timeout: 900000
     prompt: |
       # Borg Nanoprobe — Create Draft PR
@@ -991,7 +991,7 @@ nodes:
     depends_on: [action-memory-artifact]
     context: fresh
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
+    model: lm-studio/qwen/qwen3.6-27b
     idle_timeout: 900000
     prompt: |
       # Borg Nanoprobe — Workflow Summary

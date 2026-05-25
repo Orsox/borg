@@ -103,6 +103,101 @@ async def test_note_crud():
 
 
 @pytest.mark.asyncio
+async def test_combined_graph():
+    """Combined graph merges DB notes + action memory with namespaced IDs."""
+    from app.main import app
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        login = await client.post(
+            "/api/auth/token",
+            data={"username": "borg", "password": "borgborg"},
+        )
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+        # Two notes linked via a wiki-link, plus an action sharing a tag.
+        # Beta first so Alpha's [[Beta]] resolves to an existing note.
+        await client.post(
+            "/api/brain/notes",
+            json={"title": "Beta", "content": "leaf", "tags": ["shared"]},
+            headers=headers,
+        )
+        await client.post(
+            "/api/brain/notes",
+            json={"title": "Alpha", "content": "see [[Beta]]", "tags": ["shared"]},
+            headers=headers,
+        )
+        await client.post(
+            "/api/brain/actions",
+            json={"title": "Ran thing", "action_type": "test", "status": "success", "tags": ["shared"]},
+            headers=headers,
+        )
+
+        resp = await client.get("/api/brain/graph/combined", headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()
+
+        ids = {n["id"] for n in data["nodes"]}
+        sources = {n["source"] for n in data["nodes"]}
+        assert any(i.startswith("note:") for i in ids)
+        assert any(i.startswith("action:") for i in ids)
+        assert {"note", "action"} <= sources
+        # Wiki-link edge between the two notes, namespaced on both ends.
+        assert any(
+            e["source"].startswith("note:") and e["target"].startswith("note:")
+            for e in data["edges"]
+        )
+
+        # link_tags=true adds cross-source bridges between note and action (shared tag).
+        resp2 = await client.get("/api/brain/graph/combined?link_tags=true", headers=headers)
+        edges2 = resp2.json()["edges"]
+        assert len(edges2) > len(data["edges"])
+        assert any(
+            {e["source"].split(":")[0], e["target"].split(":")[0]} == {"note", "action"}
+            for e in edges2
+        )
+
+
+@pytest.mark.asyncio
+async def test_archon_failure_ingestion(tmp_path):
+    """Failed Archon run logs are imported as failed ActionMemory entries, idempotently."""
+    from app.database import AsyncSessionLocal
+    from app.second_brain import action_service
+    from app.second_brain.archon_ingest import ingest_archon_run_failures
+
+    run_logs = tmp_path / "run-logs"
+    run_logs.mkdir()
+    (run_logs / "demo-fail.log").write_text(
+        "Running workflow: demo\n"
+        "❌\n"  # bare progress marker — must be ignored
+        "❌ DAG workflow 'demo' completed with failures: 'n1': "
+        "Node 'n1' failed: SDK returned error — The operation timed out.\n"
+        "Error: Workflow failed: Workflow did not complete successfully\n",
+        encoding="utf-8",
+    )
+    (run_logs / "demo-ok.log").write_text(
+        '{"msg":"dag_workflow_finished","anyFailed":false}\nWorkflow completed\n',
+        encoding="utf-8",
+    )
+
+    async with AsyncSessionLocal() as db:
+        res = await ingest_archon_run_failures(db, archon_dir=tmp_path)
+        assert res["created"] == 1  # only the failed log
+        assert res["scanned"] == 2
+
+        # Idempotent: a second pass creates nothing new.
+        res2 = await ingest_archon_run_failures(db, archon_dir=tmp_path)
+        assert res2["created"] == 0
+        assert res2["skipped"] >= 1
+
+        failed = await action_service.list_action_memories(db, status="failed")
+        items = failed["items"]
+        assert len(items) == 1
+        entry = items[0]
+        assert "demo-fail" in entry.title
+        assert "timeout" in action_service._json_to_tags(entry.tags)
+
+
+@pytest.mark.asyncio
 async def test_user_create_and_list():
     """Test admin can create and list users."""
     from app.main import app

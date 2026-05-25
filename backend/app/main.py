@@ -67,6 +67,12 @@ async def lifespan(app: FastAPI):
     async with AsyncSessionLocal() as db:
         await seed_default_user(db)
         await action_memory_service.seed_default_actions(db)
+        # Import failed Archon runs from .archon logs (idempotent).
+        try:
+            from app.second_brain.archon_ingest import ingest_archon_run_failures
+            await ingest_archon_run_failures(db)
+        except Exception:
+            pass  # log ingestion must never block startup
 
     # Initialize scheduler
     await init_scheduler()

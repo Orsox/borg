@@ -1,0 +1,26 @@
+{
+  "name": "IR-Sensor Projekt",
+  "description": "Neutrale Business-Präsentation für IR-Sensor Projektübernahme",
+  "colors": {
+    "background": "FFFFFF",
+    "background_alt": "F5F7FA",
+    "text": "1A1A2E",
+    "text_secondary": "4A4A68",
+    "accent": "2563EB",
+    "accent_secondary": "3B82F6",
+    "accent_tertiary": "60A5FA",
+    "code_bg": "F0F4FF",
+    "card_bg": "F8FAFC",
+    "card_bg_alt": "EEF2FF"
+  },
+  "fonts": {
+    "heading": "Calibri",
+    "body": "Calibri",
+    "code": "Consolas"
+  },
+  "assets": {
+    "logo": null,
+    "logo_dark": null,
+    "icon": null
+  }
+}

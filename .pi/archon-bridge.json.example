@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "borgosBaseUrl": "http://localhost:8000",
+  "apiUsername": "bernd",
+  "apiPassword": "borgborg",
+  "pollIntervalMs": 15000,
+  "suggestionModel": "anthropic/claude-sonnet-4-5"
+}

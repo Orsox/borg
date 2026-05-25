@@ -46,6 +46,10 @@ class ActionMemory(Base):
     # Tags for categorization and filtering
     tags: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
 
+    # Optional external linkage for idempotent sync/import jobs
+    source_kind: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    source_ref: Mapped[Optional[str]] = mapped_column(String(256), nullable=True, index=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

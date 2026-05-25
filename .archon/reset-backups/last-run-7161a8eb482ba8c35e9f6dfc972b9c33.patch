@@ -1,0 +1,1136 @@
+diff --git a/.archon/workflows/borg-system-architekt.yaml b/.archon/workflows/borg-system-architekt.yaml
+index bd1854a..17304bb 100644
+--- a/.archon/workflows/borg-system-architekt.yaml
++++ b/.archon/workflows/borg-system-architekt.yaml
+@@ -474,7 +474,8 @@ nodes:
+     timeout: 10000
+ 
+   - id: implement-p03
+-    depends_on: [slot-p03]
++    # Qwen implementation concurrency throttle: batch 2 starts only after P01/P02 finish.
++    depends_on: [slot-p03, implement-p01, implement-p02]
+     when: "$slot-p03.output == 'RUN'"
+     context: fresh
+     provider: pi
+@@ -624,7 +625,8 @@ nodes:
+     timeout: 10000
+ 
+   - id: implement-p04
+-    depends_on: [slot-p04]
++    # Qwen implementation concurrency throttle: batch 2 starts only after P01/P02 finish.
++    depends_on: [slot-p04, implement-p01, implement-p02]
+     when: "$slot-p04.output == 'RUN'"
+     context: fresh
+     provider: pi
+@@ -774,7 +776,8 @@ nodes:
+     timeout: 10000
+ 
+   - id: implement-p05
+-    depends_on: [slot-p05]
++    # Qwen implementation concurrency throttle: batch 3 starts only after P03/P04 finish.
++    depends_on: [slot-p05, implement-p03, implement-p04]
+     when: "$slot-p05.output == 'RUN'"
+     context: fresh
+     provider: pi
+@@ -924,7 +927,8 @@ nodes:
+     timeout: 10000
+ 
+   - id: implement-p06
+-    depends_on: [slot-p06]
++    # Qwen implementation concurrency throttle: batch 3 starts only after P03/P04 finish.
++    depends_on: [slot-p06, implement-p03, implement-p04]
+     when: "$slot-p06.output == 'RUN'"
+     context: fresh
+     provider: pi
+@@ -1095,7 +1099,7 @@ nodes:
+     depends_on: [validate]
+     context: fresh
+     provider: pi
+-    model: openai/gpt-5.5
++    model: openai-codex/gpt-5.5
+     idle_timeout: 1800000
+     prompt: |
+       # Borg System Architekt — Final Whole-System Review
+diff --git a/backend/app/archon_hub/models.py b/backend/app/archon_hub/models.py
+index a24e414..2ce99fa 100644
+--- a/backend/app/archon_hub/models.py
++++ b/backend/app/archon_hub/models.py
+@@ -1,7 +1,7 @@
+ from datetime import datetime, timezone
+ from typing import Optional
+ 
+-from sqlalchemy import Boolean, DateTime, Integer, String, Text
++from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+ from sqlalchemy.orm import Mapped, mapped_column
+ 
+ from app.database import Base
+@@ -28,6 +28,12 @@ class ArchonAsset(Base):
+         default=lambda: datetime.now(timezone.utc),
+         nullable=False,
+     )
++    # P02: overlay fields for task linking + metadata
++    linked_task_id: Mapped[Optional[int]] = mapped_column(
++        Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True
++    )
++    custom_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
++    custom_tags: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+ 
+ 
+ class CopyHistory(Base):
+diff --git a/backend/app/archon_hub/router.py b/backend/app/archon_hub/router.py
+index 3bc8963..56804e3 100644
+--- a/backend/app/archon_hub/router.py
++++ b/backend/app/archon_hub/router.py
+@@ -1,21 +1,44 @@
+ from fastapi import APIRouter, Depends, HTTPException, Query
++from pydantic import BaseModel
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+ from app.archon_hub import service
+ from app.archon_hub.schemas import (
++    AssetCreate,
+     AssetResponse,
++    AssetUpdate,
+     CopyHistoryItem,
+     CopyResponse,
+     FavoriteResponse,
+     PaginatedAssets,
+     ScanResponse,
+ )
++from app.task_automation.schemas import TaskRunResponse
+ from app.auth.router import get_current_user
+ from app.database import get_session
+ 
+ router = APIRouter(prefix="/api/archon", tags=["archon_hub"])
+ 
+ 
++class LinkBody(BaseModel):
++    task_id: int
++
++
++async def _enrich_asset_response(asset, db) -> AssetResponse:
++    """Build an AssetResponse with P02 enrichment fields."""
++    extra = await service.enrich_asset_with_run_info(asset, db)
++    resp = AssetResponse.model_validate(asset)
++    resp.linked_task_name = extra["linked_task_name"]
++    resp.last_run_status = extra["last_run_status"]
++    resp.last_run_at = extra["last_run_at"]
++    return resp
++
++
++async def _enrich_asset_list(assets, db) -> list[AssetResponse]:
++    """Enrich a list of assets with P02 fields."""
++    return [await _enrich_asset_response(a, db) for a in assets]
++
++
+ @router.post("/scan", response_model=ScanResponse)
+ async def scan_assets(
+     db: AsyncSession = Depends(get_session),
+@@ -52,8 +75,9 @@ async def list_assets(
+         tags=tags,
+         favorites_only=favorites,
+     )
++    enriched = await _enrich_asset_list(result["items"], db)
+     return PaginatedAssets(
+-        items=[AssetResponse.model_validate(item) for item in result["items"]],
++        items=enriched,
+         total=result["total"],
+         page=result["page"],
+         size=result["size"],
+@@ -70,7 +94,7 @@ async def get_asset(
+     asset = await service.get_asset(db, asset_id)
+     if not asset:
+         raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
+-    return AssetResponse.model_validate(asset)
++    return await _enrich_asset_response(asset, db)
+ 
+ 
+ @router.post("/assets/{asset_id}/copy", response_model=CopyResponse)
+@@ -104,3 +128,107 @@ async def get_copy_history(
+ ):
+     history = await service.get_copy_history(db)
+     return [CopyHistoryItem.model_validate(h) for h in history]
++
++
++# ── Write-CRUD endpoints ────────────────────────────────────────────────────
++
++@router.post("/assets", response_model=AssetResponse, status_code=201)
++async def create_asset_route(
++    body: AssetCreate,
++    db: AsyncSession = Depends(get_session),
++    _user=Depends(get_current_user),
++):
++    try:
++        asset = await service.create_asset(db, body.model_dump(exclude_none=True))
++    except ValueError as e:
++        raise HTTPException(status_code=400, detail=str(e))
++    return await _enrich_asset_response(asset, db)
++
++
++@router.put("/assets/{asset_id}", response_model=AssetResponse)
++async def update_asset_route(
++    asset_id: int,
++    body: AssetUpdate,
++    db: AsyncSession = Depends(get_session),
++    _user=Depends(get_current_user),
++):
++    asset = await service.update_asset(db, asset_id, body.model_dump(exclude_unset=True))
++    if not asset:
++        raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
++    return await _enrich_asset_response(asset, db)
++
++
++@router.delete("/assets/{asset_id}", status_code=204)
++async def delete_asset_route(
++    asset_id: int,
++    db: AsyncSession = Depends(get_session),
++    _user=Depends(get_current_user),
++):
++    result = await service.delete_asset(db, asset_id)
++    if result is None:
++        raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
++    if result == "linked":
++        raise HTTPException(status_code=409, detail="Asset is linked to a task; unlink first")
++    return None
++
++
++# ── P02: Asset ↔ Task linking, run history, execution ──────────────────────
++
++
++@router.post("/assets/{asset_id}/link")
++async def link_asset_route(
++    asset_id: int,
++    body: LinkBody,
++    db: AsyncSession = Depends(get_session),
++    _user=Depends(get_current_user),
++):
++    result = await service.link_asset(db, asset_id, body.task_id)
++    if result is None:
++        raise HTTPException(status_code=404, detail="Asset not found")
++    if result.get("error") == "task_not_found":
++        raise HTTPException(status_code=404, detail="Task not found")
++    return result
++
++
++@router.delete("/assets/{asset_id}/link", status_code=204)
++async def unlink_asset_route(
++    asset_id: int,
++    db: AsyncSession = Depends(get_session),
++    _user=Depends(get_current_user),
++):
++    ok = await service.unlink_asset(db, asset_id)
++    if not ok:
++        raise HTTPException(status_code=404, detail="Asset not found")
++    return None
++
++
++@router.post("/assets/{asset_id}/run", status_code=202)
++async def run_asset_route(
++    asset_id: int,
++    db: AsyncSession = Depends(get_session),
++    _user=Depends(get_current_user),
++):
++    result = await service.run_asset(db, asset_id)
++    if not result:
++        raise HTTPException(status_code=404, detail="Asset not found")
++    return result
++
++
++@router.get("/assets/{asset_id}/runs")
++async def runs_route(
++    asset_id: int,
++    page: int = Query(default=1, ge=1),
++    size: int = Query(default=20, ge=1, le=100),
++    db: AsyncSession = Depends(get_session),
++    _user=Depends(get_current_user),
++):
++    runs = await service.get_asset_runs(db, asset_id, page, size)
++    if runs is None:
++        raise HTTPException(status_code=404, detail="Asset not found")
++    return {
++        "items": [TaskRunResponse.model_validate(r) for r in runs["items"]],
++        "total": runs["total"],
++        "page": runs["page"],
++        "size": runs["size"],
++        "pages": runs["pages"],
++    }
+diff --git a/backend/app/archon_hub/scanner.py b/backend/app/archon_hub/scanner.py
+index a902891..08e9e84 100644
+--- a/backend/app/archon_hub/scanner.py
++++ b/backend/app/archon_hub/scanner.py
+@@ -1,5 +1,6 @@
+ import json
+ import logging
++import re
+ from datetime import datetime, timezone
+ from pathlib import Path
+ from typing import Any
+@@ -8,6 +9,16 @@ import yaml
+ 
+ logger = logging.getLogger(__name__)
+ 
++_SLUG_RE = re.compile(r"[^a-z0-9_-]+")
++
++
++def _slugify(name: str) -> str:
++    """Slugify a name for use as a filename. Raises ValueError on invalid input."""
++    slug = _SLUG_RE.sub("-", name.lower()).strip("-")
++    if not slug or ".." in slug:
++        raise ValueError(f"Invalid asset name for slug: {name!r}")
++    return slug[:128]
++
+ 
+ def _extract_tags(data: dict[str, Any]) -> list[str]:
+     tags = data.get("tags", [])
+@@ -84,6 +95,49 @@ def parse_asset_file(file_path: Path) -> dict[str, Any] | None:
+ EXCLUDED_DIRS = {"borgos_copies", ".git", "__pycache__", "node_modules", ".venv", "venv"}
+ 
+ 
++def write_asset_file(archon_root: str, subdir: str, payload: dict) -> Path:
++    """Write a YAML asset file under archon_root/subdir. Path-contained.
++
++    Returns the resolved Path of the written file.
++    """
++    root = Path(archon_root).resolve()
++    target_dir = (root / subdir).resolve()
++    if not target_dir.is_relative_to(root):
++        raise ValueError("subdir escapes ARCHON_PATH")
++    target_dir.mkdir(parents=True, exist_ok=True)
++
++    slug = _slugify(str(payload.get("name", "")))
++    path = (target_dir / f"{slug}.yaml").resolve()
++    if not path.is_relative_to(root):
++        raise ValueError("resolved path escapes ARCHON_PATH")
++
++    # Canonical YAML — preserve key order: name, type, description, tags, body.
++    doc: dict[str, Any] = {
++        "name": payload["name"],
++        "type": payload.get("type", "unknown"),
++    }
++    if payload.get("description"):
++        doc["description"] = payload["description"]
++    if payload.get("tags"):
++        doc["tags"] = payload["tags"]
++
++    raw_body = payload.get("raw_content") or ""
++    # If raw_content is valid YAML mapping, merge top-level keys not already in doc.
++    try:
++        parsed_body = yaml.safe_load(raw_body) if raw_body.strip() else None
++        if isinstance(parsed_body, dict):
++            for k, v in parsed_body.items():
++                if k not in doc:
++                    doc[k] = v
++    except yaml.YAMLError:
++        # raw_content was non-YAML free text; write it as a 'body' field.
++        doc["body"] = raw_body
++
++    yaml_text = yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
++    path.write_text(yaml_text, encoding="utf-8")
++    return path
++
++
+ def scan_directory(archon_path: str) -> list[dict[str, Any]]:
+     """Recursively scan archon_path for YAML/JSON asset files."""
+     path = Path(archon_path)
+diff --git a/backend/app/archon_hub/schemas.py b/backend/app/archon_hub/schemas.py
+index 2ff4c2d..2bb5bb2 100644
+--- a/backend/app/archon_hub/schemas.py
++++ b/backend/app/archon_hub/schemas.py
+@@ -2,7 +2,7 @@ import json
+ from datetime import datetime
+ from typing import Any, Optional
+ 
+-from pydantic import BaseModel, ConfigDict, field_validator
++from pydantic import BaseModel, ConfigDict, Field, field_validator
+ 
+ 
+ class AssetResponse(BaseModel):
+@@ -18,6 +18,13 @@ class AssetResponse(BaseModel):
+     last_scanned: str
+     is_favorite: bool
+     created_at: str
++    linked_task_id: Optional[int] = None
++    custom_notes: Optional[str] = None
++    custom_tags: list[str] = []
++    # P02: computed enrichment fields
++    linked_task_name: Optional[str] = None
++    last_run_status: Optional[str] = None
++    last_run_at: Optional[str] = None
+ 
+     @field_validator("tags", mode="before")
+     @classmethod
+@@ -29,6 +36,16 @@ class AssetResponse(BaseModel):
+                 return []
+         return v or []
+ 
++    @field_validator("custom_tags", mode="before")
++    @classmethod
++    def parse_custom_tags(cls, v: Any) -> list[str]:
++        if isinstance(v, str):
++            try:
++                return json.loads(v)
++            except Exception:
++                return []
++        return v or []
++
+     @field_validator("last_scanned", "created_at", mode="before")
+     @classmethod
+     def format_dt(cls, v: Any) -> str:
+@@ -37,6 +54,24 @@ class AssetResponse(BaseModel):
+         return str(v)
+ 
+ 
++class AssetCreate(BaseModel):
++    name: str = Field(..., min_length=1, max_length=256)
++    type: str = Field(..., pattern="^(workflow|skill|agent|unknown)$")
++    description: Optional[str] = None
++    raw_content: str = ""
++    tags: list[str] = []
++    subdir: Optional[str] = None
++
++
++class AssetUpdate(BaseModel):
++    name: Optional[str] = None
++    description: Optional[str] = None
++    raw_content: Optional[str] = None
++    tags: Optional[list[str]] = None
++    custom_notes: Optional[str] = None
++    custom_tags: Optional[list[str]] = None
++
++
+ class PaginatedAssets(BaseModel):
+     items: list[AssetResponse]
+     total: int
+diff --git a/backend/app/archon_hub/service.py b/backend/app/archon_hub/service.py
+index a0335a4..ae676dd 100644
+--- a/backend/app/archon_hub/service.py
++++ b/backend/app/archon_hub/service.py
+@@ -4,11 +4,14 @@ import shutil
+ from datetime import datetime, timezone
+ from pathlib import Path
+ 
++from fastapi import HTTPException
+ from sqlalchemy import func, or_, select, update
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
++import yaml
++
+ from app.archon_hub.models import ArchonAsset, CopyHistory
+-from app.archon_hub.scanner import scan_directory
++from app.archon_hub.scanner import parse_asset_file, scan_directory, write_asset_file
+ from app.config import settings
+ 
+ 
+@@ -157,3 +160,190 @@ async def get_copy_history(db: AsyncSession) -> list[CopyHistory]:
+         select(CopyHistory).order_by(CopyHistory.copied_at.desc()).limit(50)
+     )
+     return list(result.scalars().all())
++
++
++# ── Write-CRUD helpers ──────────────────────────────────────────────────────
++
++def _check_write_enabled() -> None:
++    """Raise 503 when ARCHON_WRITE_ENABLED is false."""
++    if not settings.archon_write_enabled:
++        raise HTTPException(status_code=503, detail="Archon writes are disabled")
++
++
++async def create_asset(db: AsyncSession, payload: dict) -> ArchonAsset:
++    """Create a new asset: write YAML file → parse → insert DB row."""
++    _check_write_enabled()
++    subdir = payload.pop("subdir", None) or "borgos_authored"
++    path = write_asset_file(settings.archon_path, subdir, payload)
++    parsed = parse_asset_file(path)
++    if not parsed:
++        raise HTTPException(status_code=500, detail="Could not re-parse written file")
++
++    asset = ArchonAsset(
++        name=parsed["name"],
++        type=parsed["type"],
++        description=parsed["description"],
++        tags=parsed["tags"],
++        file_path=parsed["file_path"],
++        raw_content=parsed["raw_content"],
++        last_scanned=parsed["last_scanned"],
++        is_favorite=False,
++        custom_tags="[]",
++    )
++    db.add(asset)
++    await db.commit()
++    await db.refresh(asset)
++    return asset
++
++
++async def update_asset(db: AsyncSession, asset_id: int, patch: dict) -> ArchonAsset | None:
++    """Update an asset: rewrite file for file-bound fields, update DB for overlay fields."""
++    _check_write_enabled()
++    asset = await get_asset(db, asset_id)
++    if not asset:
++        return None
++
++    # File-bound fields: name, description, tags, raw_content
++    file_fields = {k: patch[k] for k in ("name", "description", "tags", "raw_content") if k in patch}
++    if file_fields:
++        current_path = Path(asset.file_path)
++        merged = {
++            "name": patch.get("name", asset.name),
++            "type": asset.type,
++            "description": patch.get("description", asset.description),
++            "tags": patch.get("tags") if "tags" in patch else json.loads(asset.tags or "[]"),
++            "raw_content": patch.get("raw_content", asset.raw_content),
++        }
++
++        # Write directly to the existing file path (do not relocate).
++        doc = {k: v for k, v in {
++            "name": merged["name"],
++            "type": merged["type"],
++            "description": merged["description"],
++            "tags": merged["tags"],
++        }.items() if v is not None}
++        current_path.write_text(
++            yaml.safe_dump(doc, sort_keys=False, allow_unicode=True),
++            encoding="utf-8",
++        )
++        parsed = parse_asset_file(current_path)
++        if parsed:
++            asset.name = parsed["name"]
++            asset.description = parsed["description"]
++            asset.tags = parsed["tags"]
++            asset.raw_content = parsed["raw_content"]
++            asset.last_scanned = parsed["last_scanned"]
++
++    # DB-only overlay fields
++    if "custom_notes" in patch:
++        asset.custom_notes = patch["custom_notes"]
++    if "custom_tags" in patch:
++        asset.custom_tags = json.dumps(patch["custom_tags"])
++
++    await db.commit()
++    await db.refresh(asset)
++    return asset
++
++
++async def delete_asset(db: AsyncSession, asset_id: int) -> str | None:
++    """Delete an asset: remove file + DB row. Returns 'deleted', 'linked', or None."""
++    _check_write_enabled()
++    asset = await get_asset(db, asset_id)
++    if not asset:
++        return None
++    if asset.linked_task_id is not None:
++        return "linked"
++    Path(asset.file_path).unlink(missing_ok=True)
++    await db.delete(asset)
++    await db.commit()
++    return "deleted"
++
++
++# ── P02: Asset ↔ Task linking, run history, execution ─────────────────────
++
++
++async def link_asset(db: AsyncSession, asset_id: int, task_id: int) -> dict | None:
++    """Link an asset to a Task. Returns dict with asset_id, task_id, task_name."""
++    asset = await get_asset(db, asset_id)
++    if not asset:
++        return None
++    task = (await db.execute(select(Task).where(Task.id == task_id))).scalar_one_or_none()
++    if not task:
++        return {"error": "task_not_found"}
++    asset.linked_task_id = task.id
++    await db.commit()
++    await db.refresh(asset)
++    return {"asset_id": asset.id, "task_id": task.id, "task_name": task.name}
++
++
++async def unlink_asset(db: AsyncSession, asset_id: int) -> bool:
++    """Unlink an asset from its Task."""
++    asset = await get_asset(db, asset_id)
++    if not asset:
++        return False
++    asset.linked_task_id = None
++    await db.commit()
++    return True
++
++
++async def _ensure_runnable_task(db: AsyncSession, asset: ArchonAsset) -> int:
++    """Ensure the asset has a linked Task, creating an ephemeral one if needed."""
++    if asset.linked_task_id:
++        # Verify the linked task still exists
++        task = await task_service.get_task(db, asset.linked_task_id)
++        if task:
++            return asset.linked_task_id
++        # Stale reference — fall through to create new
++    task = await task_service.create_task(
++        db,
++        name=f"archon:{asset.name}",
++        task_type="archon_workflow",
++        archon_workflow_name=asset.name,
++        description=f"Auto-created for ArchonAsset {asset.id}",
++        tags=["archon-ephemeral"],
++    )
++    asset.linked_task_id = task.id
++    await db.commit()
++    return task.id
++
++
++async def run_asset(db: AsyncSession, asset_id: int) -> dict | None:
++    """Trigger execution of an asset. Creates ephemeral Task if not linked."""
++    asset = await get_asset(db, asset_id)
++    if not asset:
++        return None
++    task_id = await _ensure_runnable_task(db, asset)
++    run_id = await task_service.run_task_now(db, task_id)
++    return {"task_run_id": run_id, "task_id": task_id, "message": "triggered"}
++
++
++async def get_asset_runs(
++    db: AsyncSession, asset_id: int, page: int = 1, size: int = 20
++) -> dict | None:
++    """Get paginated run history for an asset's linked Task."""
++    asset = await get_asset(db, asset_id)
++    if not asset:
++        return None
++    if not asset.linked_task_id:
++        return {"items": [], "total": 0, "page": page, "size": size, "pages": 0}
++    return await task_service.get_task_runs(db, asset.linked_task_id, page, size)
++
++
++async def enrich_asset_with_run_info(asset: ArchonAsset, db: AsyncSession) -> dict:
++    """Compute linked_task_name, last_run_status, last_run_at for an asset."""
++    extra: dict = {"linked_task_name": None, "last_run_status": None, "last_run_at": None}
++    if asset.linked_task_id:
++        task = (await db.execute(select(Task).where(Task.id == asset.linked_task_id))).scalar_one_or_none()
++        if task:
++            extra["linked_task_name"] = task.name
++        # Latest run
++        latest = (await db.execute(
++            select(TaskRun)
++            .where(TaskRun.task_id == asset.linked_task_id)
++            .order_by(desc(TaskRun.started_at))
++            .limit(1)
++        )).scalar_one_or_none()
++        if latest:
++            extra["last_run_status"] = latest.status
++            extra["last_run_at"] = latest.started_at.isoformat() if latest.started_at else None
++    return extra
+diff --git a/backend/app/config.py b/backend/app/config.py
+index 4de6b90..80c0ce8 100644
+--- a/backend/app/config.py
++++ b/backend/app/config.py
+@@ -9,6 +9,8 @@ class Settings(BaseSettings):
+     refresh_token_expire_days: int = 7
+     initial_password: str = "borgborg"
+     archon_path: str = "/opt/archon"
++    archon_write_enabled: bool = True
++    """Kill switch for Archon write operations (create/update/delete assets)."""
+     cors_origins: str = "http://localhost:5173"
+ 
+     model_config = SettingsConfigDict(
+diff --git a/backend/app/main.py b/backend/app/main.py
+index d430e8a..2df3a05 100644
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -60,6 +60,16 @@ async def lifespan(app: FastAPI):
+                 await conn.execute(text(ddl))
+             except Exception:
+                 pass  # column already exists
++        # P02: overlay columns for ArchonAsset task linking + metadata
++        for ddl in [
++            "ALTER TABLE archon_assets ADD COLUMN linked_task_id INTEGER",
++            "ALTER TABLE archon_assets ADD COLUMN custom_notes TEXT",
++            "ALTER TABLE archon_assets ADD COLUMN custom_tags TEXT NOT NULL DEFAULT '[]'",
++        ]:
++            try:
++                await conn.execute(text(ddl))
++            except Exception:
++                pass  # column already exists
+ 
+     # Seed default admin user + initial action memories
+     async with AsyncSessionLocal() as db:
+diff --git a/backend/app/task_automation/router.py b/backend/app/task_automation/router.py
+index 06ad1a9..6d4482d 100644
+--- a/backend/app/task_automation/router.py
++++ b/backend/app/task_automation/router.py
+@@ -1,8 +1,10 @@
+ """API router for Task Automation module."""
+ 
++import asyncio
+ import json
+-from fastapi import APIRouter, Depends, HTTPException, Query
++from fastapi import APIRouter, Depends, HTTPException, Query, Request
+ from fastapi.responses import StreamingResponse
++from jose import JWTError
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+ from app.task_automation import service
+@@ -16,12 +18,40 @@ from app.task_automation.schemas import (
+     TaskUpdate,
+     ToggleResponse,
+ )
++from app.task_automation.scheduler import subscribe, unsubscribe
+ from app.auth.router import get_current_user
++from app.auth import service as auth_service
+ from app.database import get_session
+ 
+ router = APIRouter(prefix="/api/tasks", tags=["task_automation"])
+ 
+ 
++async def sse_auth_dep(request: Request, db: AsyncSession = Depends(get_session)):
++    """Auth dependency for SSE endpoints: accepts Bearer header OR ?token= query param."""
++    token = None
++    auth_header = request.headers.get("authorization")
++    if auth_header and auth_header.lower().startswith("bearer "):
++        token = auth_header[7:]
++    if not token:
++        token = request.query_params.get("token")
++    if not token:
++        raise HTTPException(status_code=401, detail="Missing token")
++    try:
++        payload = auth_service.decode_token(token)
++        username: str = payload.get("sub")
++        if not username or payload.get("type") != "access":
++            raise HTTPException(status_code=401, detail="Invalid token")
++    except JWTError:
++        raise HTTPException(status_code=401, detail="Invalid or expired token")
++
++    user = await auth_service.get_user_by_username(db, username)
++    if not user:
++        raise HTTPException(status_code=401, detail="User not found")
++    if not user.is_active:
++        raise HTTPException(status_code=401, detail="Account deactivated")
++    return user
++
++
+ @router.post("", response_model=TaskResponse, status_code=201)
+ async def create_task(
+     body: TaskCreate,
+@@ -228,18 +258,29 @@ async def get_task_runs(
+ 
+ @router.get("/stream")
+ async def sse_stream(
+-    _user=Depends(get_current_user),
++    request: Request,
++    db: AsyncSession = Depends(get_session),
++    _user=Depends(sse_auth_dep),
+ ):
+-    """Server-Sent Events endpoint for real-time task notifications."""
++    """Server-Sent Events endpoint for real-time task notifications.
++
++    Accepts auth via Authorization: Bearer <token> header OR ?token=<token> query param
++    (the latter is needed for EventSource which cannot set custom headers).
++    """
+     async def event_generator():
+-        from app.task_automation.scheduler import sse_queue
+-        while True:
+-            try:
+-                event = await sse_queue.get()
+-                yield f"data: {json.dumps(event)}\n\n"
+-            except Exception:
+-                yield f"data: {json.dumps({'type': 'error', 'message': 'Stream disconnected'})}\n\n"
+-    
++        q = subscribe()
++        try:
++            while True:
++                if await request.is_disconnected():
++                    break
++                try:
++                    event = await asyncio.wait_for(q.get(), timeout=15.0)
++                    yield f"data: {json.dumps(event)}\n\n"
++                except asyncio.TimeoutError:
++                    yield ": keepalive\n\n"
++        finally:
++            unsubscribe(q)
++
+     return StreamingResponse(
+         event_generator(),
+         media_type="text/event-stream",
+diff --git a/backend/app/task_automation/scheduler.py b/backend/app/task_automation/scheduler.py
+index 65d1691..ccd73c2 100644
+--- a/backend/app/task_automation/scheduler.py
++++ b/backend/app/task_automation/scheduler.py
+@@ -18,8 +18,32 @@ logger = logging.getLogger(__name__)
+ # Global scheduler instance
+ scheduler: AsyncIOScheduler | None = None
+ 
+-# SSE event queue
+-sse_queue: asyncio.Queue = asyncio.Queue()
++# SSE event queue — subscriber pool for fan-out (P02)
++_subscribers: list[asyncio.Queue] = []
++
++
++def subscribe() -> asyncio.Queue:
++    """Create a new subscriber queue and return it."""
++    q: asyncio.Queue = asyncio.Queue()
++    _subscribers.append(q)
++    return q
++
++
++def unsubscribe(q: asyncio.Queue) -> None:
++    """Remove a subscriber queue."""
++    try:
++        _subscribers.remove(q)
++    except ValueError:
++        pass
++
++
++async def publish(event: dict) -> None:
++    """Fan-out an event to all subscriber queues."""
++    for q in list(_subscribers):
++        try:
++            q.put_nowait(event)
++        except asyncio.QueueFull:
++            pass  # drop on backpressure
+ 
+ 
+ async def init_scheduler() -> None:
+@@ -107,7 +131,7 @@ async def _execute_task(task_id: int) -> None:
+         await db.refresh(run)
+         
+         # Notify SSE
+-        await sse_queue.put({
++        await publish({
+             "type": "task_run_started",
+             "task_id": task_id,
+             "task_name": task.name,
+@@ -141,7 +165,7 @@ async def _execute_task(task_id: int) -> None:
+             await db.commit()
+             
+             # Notify SSE
+-            await sse_queue.put({
++            await publish({
+                 "type": f"task_run_{'completed' if exit_code == 0 else 'failed'}",
+                 "task_id": task_id,
+                 "task_name": task.name,
+@@ -158,7 +182,7 @@ async def _execute_task(task_id: int) -> None:
+             run.stderr = str(e)
+             await db.commit()
+             
+-            await sse_queue.put({
++            await publish({
+                 "type": "task_run_failed",
+                 "task_id": task_id,
+                 "task_name": task.name,
+diff --git a/backend/app/task_automation/service.py b/backend/app/task_automation/service.py
+index 22c5562..47c8616 100644
+--- a/backend/app/task_automation/service.py
++++ b/backend/app/task_automation/service.py
+@@ -12,7 +12,7 @@ from app.task_automation.scheduler import (
+     register_task,
+     remove_task,
+     reschedule_task,
+-    sse_queue,
++    publish,
+ )
+ 
+ 
+@@ -195,7 +195,7 @@ async def run_task_now(db: AsyncSession, task_id: int) -> int | None:
+     await db.refresh(run)
+     
+     # Notify SSE
+-    await sse_queue.put({
++    await publish({
+         "type": "task_run_started",
+         "task_id": task_id,
+         "task_name": task.name,
+@@ -253,7 +253,7 @@ async def _execute_task_now(task_id: int, run_id: int) -> None:
+             
+             await db.commit()
+             
+-            await sse_queue.put({
++            await publish({
+                 "type": f"task_run_{'completed' if exit_code == 0 else 'failed'}",
+                 "task_id": task_id,
+                 "task_name": task.name,
+@@ -305,5 +305,9 @@ async def get_task_runs(
+ 
+ 
+ async def get_sse_event() -> dict:
+-    """Get the next SSE event from the queue."""
+-    return await sse_queue.get()
++    """Get the next SSE event from a subscriber queue."""
++    q = subscribe()
++    try:
++        return await q.get()
++    finally:
++        unsubscribe(q)
+diff --git a/backend/tests/test_api.py b/backend/tests/test_api.py
+index 23d339f..05fc272 100644
+--- a/backend/tests/test_api.py
++++ b/backend/tests/test_api.py
+@@ -2,6 +2,7 @@
+ 
+ import pytest
+ from httpx import AsyncClient, ASGITransport
++from pathlib import Path
+ 
+ 
+ @pytest.mark.asyncio
+@@ -258,3 +259,230 @@ async def test_task_crud():
+         # Delete task
+         response = await client.delete(f"/api/tasks/{task_id}", headers=headers)
+         assert response.status_code == 200
++
++
++# ── P01: Asset write-CRUD tests ─────────────────────────────────────────────
++
++@pytest.mark.asyncio
++async def test_create_asset_writes_file_and_row():
++    """POST /api/archon/assets creates a YAML file and a DB row."""
++    from app.main import app
++    from app.config import settings
++    transport = ASGITransport(app=app)
++    async with AsyncClient(transport=transport, base_url="http://test") as client:
++        login = await client.post(
++            "/api/auth/token",
++            data={"username": "borg", "password": "borgborg"},
++        )
++        token = login.json()["access_token"]
++        headers = {"Authorization": f"Bearer {token}"}
++
++        response = await client.post(
++            "/api/archon/assets",
++            json={
++                "name": "Test Workflow",
++                "type": "workflow",
++                "description": "A test workflow",
++                "raw_content": "steps: []",
++                "tags": ["test"],
++            },
++            headers=headers,
++        )
++        print(f"DEBUG response status: {response.status_code}")
++        print(f"DEBUG response body: {response.text}")
++        assert response.status_code == 201
++        asset = response.json()
++        assert asset["name"] == "Test Workflow"
++        assert asset["type"] == "workflow"
++        assert asset["description"] == "A test workflow"
++        assert asset["linked_task_id"] is None
++        assert asset["custom_notes"] is None
++
++        # Verify file was written
++        file_path = asset["file_path"]
++        assert Path(file_path).exists()
++        assert "borgos_authored" in file_path
++
++
++@pytest.mark.asyncio
++async def test_create_asset_rejects_path_traversal():
++    """POST /api/archon/assets with a name containing '..' should be rejected."""
++    from app.main import app
++    transport = ASGITransport(app=app)
++    async with AsyncClient(transport=transport, base_url="http://test") as client:
++        login = await client.post(
++            "/api/auth/token",
++            data={"username": "borg", "password": "borgborg"},
++        )
++        token = login.json()["access_token"]
++        headers = {"Authorization": f"Bearer {token}"}
++
++        response = await client.post(
++            "/api/archon/assets",
++            json={
++                "name": "../../etc/passwd",
++                "type": "workflow",
++            },
++            headers=headers,
++        )
++        # The slugify function strips '..' so it becomes empty → ValueError → 400
++        assert response.status_code == 400
++
++
++@pytest.mark.asyncio
++async def test_update_asset_modifies_file_and_row():
++    """PUT /api/archon/assets/{id} modifies the file and DB row."""
++    from app.main import app
++    transport = ASGITransport(app=app)
++    async with AsyncClient(transport=transport, base_url="http://test") as client:
++        login = await client.post(
++            "/api/auth/token",
++            data={"username": "borg", "password": "borgborg"},
++        )
++        token = login.json()["access_token"]
++        headers = {"Authorization": f"Bearer {token}"}
++
++        # Create first
++        create = await client.post(
++            "/api/archon/assets",
++            json={"name": "Update Me", "type": "skill"},
++            headers=headers,
++        )
++        assert create.status_code == 201
++        asset = create.json()
++        asset_id = asset["id"]
++        file_path = asset["file_path"]
++
++        # Update
++        response = await client.put(
++            f"/api/archon/assets/{asset_id}",
++            json={
++                "description": "Updated description",
++                "custom_notes": "Some notes",
++                "custom_tags": ["updated"],
++            },
++            headers=headers,
++        )
++        assert response.status_code == 200
++        updated = response.json()
++        assert updated["description"] == "Updated description"
++        assert updated["custom_notes"] == "Some notes"
++        assert updated["custom_tags"] == ["updated"]
++
++        # File still exists
++        assert Path(file_path).exists()
++
++
++@pytest.mark.asyncio
++async def test_delete_asset_removes_both():
++    """DELETE /api/archon/assets/{id} removes file and DB row."""
++    from app.main import app
++    transport = ASGITransport(app=app)
++    async with AsyncClient(transport=transport, base_url="http://test") as client:
++        login = await client.post(
++            "/api/auth/token",
++            data={"username": "borg", "password": "borgborg"},
++        )
++        token = login.json()["access_token"]
++        headers = {"Authorization": f"Bearer {token}"}
++
++        # Create
++        create = await client.post(
++            "/api/archon/assets",
++            json={"name": "Delete Me", "type": "agent"},
++            headers=headers,
++        )
++        assert create.status_code == 201
++        asset = create.json()
++        asset_id = asset["id"]
++        file_path = asset["file_path"]
++
++        # Delete
++        response = await client.delete(
++            f"/api/archon/assets/{asset_id}",
++            headers=headers,
++        )
++        assert response.status_code == 204
++
++        # File gone
++        assert not Path(file_path).exists()
++
++        # DB row gone
++        response = await client.get(
++            f"/api/archon/assets/{asset_id}",
++            headers=headers,
++        )
++        assert response.status_code == 404
++
++
++@pytest.mark.asyncio
++async def test_delete_linked_asset_returns_409():
++    """DELETE refuses (409) when asset has linked_task_id set."""
++    from app.main import app
++    from app.archon_hub.models import ArchonAsset
++    from app.database import AsyncSessionLocal
++    from sqlalchemy import select
++    transport = ASGITransport(app=app)
++    async with AsyncClient(transport=transport, base_url="http://test") as client:
++        login = await client.post(
++            "/api/auth/token",
++            data={"username": "borg", "password": "borgborg"},
++        )
++        token = login.json()["access_token"]
++        headers = {"Authorization": f"Bearer {token}"}
++
++        # Create
++        create = await client.post(
++            "/api/archon/assets",
++            json={"name": "Linked Asset", "type": "workflow"},
++            headers=headers,
++        )
++        assert create.status_code == 201
++        asset = create.json()
++        asset_id = asset["id"]
++
++        # Manually set linked_task_id
++        async with AsyncSessionLocal() as db:
++            result = await db.execute(
++                select(ArchonAsset).where(ArchonAsset.id == asset_id)
++            )
++            asset_obj = result.scalar_one_or_none()
++            if asset_obj:
++                asset_obj.linked_task_id = 999  # non-existent task
++                await db.commit()
++
++        # Delete should be refused
++        response = await client.delete(
++            f"/api/archon/assets/{asset_id}",
++            headers=headers,
++        )
++        assert response.status_code == 409
++
++
++@pytest.mark.asyncio
++async def test_write_disabled_returns_503():
++    """When ARCHON_WRITE_ENABLED is false, create/update/delete return 503."""
++    from app.main import app
++    from app import config
++    transport = ASGITransport(app=app)
++    async with AsyncClient(transport=transport, base_url="http://test") as client:
++        login = await client.post(
++            "/api/auth/token",
++            data={"username": "borg", "password": "borgborg"},
++        )
++        token = login.json()["access_token"]
++        headers = {"Authorization": f"Bearer {token}"}
++
++        # Disable writes
++        original = config.settings.archon_write_enabled
++        config.settings.archon_write_enabled = False
++        try:
++            # Create should fail
++            response = await client.post(
++                "/api/archon/assets",
++                json={"name": "Blocked", "type": "workflow"},
++                headers=headers,
++            )
++            assert response.status_code == 503
++        finally:
++            config.settings.archon_write_enabled = original
+diff --git a/backend/uv.lock b/backend/uv.lock
+index a8341c5..ecf0a9d 100644
+--- a/backend/uv.lock
++++ b/backend/uv.lock
+@@ -145,6 +145,7 @@ dependencies = [
+     { name = "pydantic" },
+     { name = "pydantic-settings" },
+     { name = "python-dotenv" },
++    { name = "python-frontmatter" },
+     { name = "python-jose", extra = ["cryptography"] },
+     { name = "python-multipart" },
+     { name = "pyyaml" },
+@@ -173,6 +174,7 @@ requires-dist = [
+     { name = "pytest", marker = "extra == 'dev'", specifier = "==8.3.3" },
+     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = "==0.24.0" },
+     { name = "python-dotenv", specifier = "==1.0.1" },
++    { name = "python-frontmatter", specifier = ">=1.1.0" },
+     { name = "python-jose", extras = ["cryptography"], specifier = "==3.3.0" },
+     { name = "python-multipart", specifier = "==0.0.12" },
+     { name = "pyyaml", specifier = ">=6.0.0" },
+@@ -731,6 +733,18 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/6a/3e/b68c118422ec867fa7ab88444e1274aa40681c606d59ac27de5a5588f082/python_dotenv-1.0.1-py3-none-any.whl", hash = "sha256:f7b63ef50f1b690dddf550d03497b66d609393b40b564ed0d674909a68ebf16a", size = 19863, upload-time = "2024-01-23T06:32:58.246Z" },
+ ]
+ 
++[[package]]
++name = "python-frontmatter"
++version = "1.2.0"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "pyyaml" },
++]
++sdist = { url = "https://files.pythonhosted.org/packages/e9/21/88aefb4f1de6661b5a003175e21e4a5ad94f5e52b2abf4170a11883c7d81/python_frontmatter-1.2.0.tar.gz", hash = "sha256:5b26ccd3cb85af77feb11d83b922c7bb5aeccb0c9d3fb236b938c600b6322984", size = 16890, upload-time = "2026-05-17T23:42:05.493Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/1c/b1/ec12e3e746234006b77dec69d53878253b1da09dbb55fa3cb456083d9069/python_frontmatter-1.2.0-py3-none-any.whl", hash = "sha256:e1ee1d4300450a2f84e778eb4f70edf573da6cd7d463801066f05edc4e819c78", size = 10396, upload-time = "2026-05-17T23:42:04.637Z" },
++]
++
+ [[package]]
+ name = "python-jose"
+ version = "3.3.0"

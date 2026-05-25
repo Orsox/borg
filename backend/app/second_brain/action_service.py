@@ -54,6 +54,8 @@ async def create_action_memory(
     output_path: str | None = None,
     metadata: dict | None = None,
     tags: list[str] | None = None,
+    source_kind: str | None = None,
+    source_ref: str | None = None,
 ) -> ActionMemory:
     """Create a new action memory entry."""
     if tools_used is None:
@@ -74,6 +76,8 @@ async def create_action_memory(
         output_path=output_path,
         metadata_json=_metadata_to_json(metadata),
         tags=_tags_to_json(tags),
+        source_kind=source_kind,
+        source_ref=source_ref,
     )
     db.add(action)
     await db.commit()
@@ -118,7 +122,11 @@ async def list_action_memories(
     if search and search.strip():
         term = f"%{search.strip()}%"
         query = query.where(
-            ActionMemory.title.ilike(term) | ActionMemory.description.ilike(term)
+            ActionMemory.title.ilike(term)
+            | ActionMemory.description.ilike(term)
+            | ActionMemory.metadata_json.ilike(term)
+            | ActionMemory.tools_used.ilike(term)
+            | ActionMemory.tags.ilike(term)
         )
 
     # Action type filter

@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import delete, select
+
+from app.second_brain.action_models import ActionMemory
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.archon_system.client import ArchonClient, ArchonUnavailable
@@ -112,6 +114,186 @@ async def sync_and_get_health(db: AsyncSession) -> dict[str, Any]:
 # Runs
 # ---------------------------------------------------------------------------
 
+def _normalize_action_status(status: str | None) -> str:
+    normalized = (status or "unknown").strip().lower()
+    if normalized in {"running", "queued", "pending", "in_progress"}:
+        return "in_progress"
+    if normalized in {"completed", "complete", "success", "succeeded", "done", "passed"}:
+        return "success"
+    if normalized in {"failed", "error", "cancelled", "canceled", "timeout", "timed_out"}:
+        return "failed"
+    return "in_progress"
+
+
+def _extract_run_errors(raw: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+
+    def _collect_from(source: dict[str, Any]) -> None:
+        for key in ("error", "last_error", "failure_reason", "stderr", "rejection_reason"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                errors.append(value.strip())
+        raw_errors = source.get("errors")
+        if isinstance(raw_errors, list):
+            for item in raw_errors:
+                if isinstance(item, str) and item.strip():
+                    errors.append(item.strip())
+                elif isinstance(item, dict):
+                    message = item.get("message") or item.get("error") or item.get("detail")
+                    if isinstance(message, str) and message.strip():
+                        errors.append(message.strip())
+
+    # Top-level fields (fallback / older Archon payloads)
+    _collect_from(raw)
+    # Real Archon dashboard payloads nest the failure under `metadata`
+    metadata = raw.get("metadata")
+    if isinstance(metadata, dict):
+        _collect_from(metadata)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for error in errors:
+        if error not in seen:
+            seen.add(error)
+            deduped.append(error)
+    return deduped
+
+
+def _collect_error_signals(raw: dict[str, Any]) -> dict[str, Any]:
+    """Detect any error signal on a run, even when the overall status is not failed."""
+    messages = _extract_run_errors(raw)
+    try:
+        agents_failed = int(raw.get("agents_failed") or 0)
+    except (TypeError, ValueError):
+        agents_failed = 0
+    step_failed = str(raw.get("current_step_status") or "").strip().lower() in {"failed", "error"}
+    status_failed = _normalize_action_status(raw.get("status")) == "failed"
+    has_errors = bool(messages) or agents_failed > 0 or step_failed or status_failed
+    return {
+        "messages": messages,
+        "agents_failed": agents_failed,
+        "step_failed": step_failed,
+        "status_failed": status_failed,
+        "has_errors": has_errors,
+    }
+
+
+def _merge_errors(prior: Any, new: list[str]) -> list[str]:
+    """Accumulate error messages across syncs, dedup preserving order."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for source in (prior if isinstance(prior, list) else [], new):
+        for error in source:
+            if isinstance(error, str) and error.strip() and error not in seen:
+                seen.add(error)
+                merged.append(error)
+    return merged
+
+
+async def _upsert_run_action_memory(db: AsyncSession, raw: dict[str, Any], mapped: dict[str, Any]) -> None:
+    archon_run_id = mapped["archon_run_id"]
+    if not archon_run_id:
+        return
+
+    action_status = _normalize_action_status(mapped.get("status"))
+    signals = _collect_error_signals(raw)
+    user_message = (mapped.get("user_message") or "").strip()
+
+    result = await db.execute(
+        select(ActionMemory).where(
+            ActionMemory.source_kind == "archon_run",
+            ActionMemory.source_ref == archon_run_id,
+        )
+    )
+    action = result.scalar_one_or_none()
+
+    # Accumulate errors across syncs so transient/recovered errors are not lost.
+    prior_errors: list[str] = []
+    if action is not None:
+        prior_metadata = json.loads(action.metadata_json) if action.metadata_json else {}
+        if isinstance(prior_metadata, dict):
+            prior_errors = prior_metadata.get("errors") or []
+    accumulated_errors = _merge_errors(prior_errors, signals["messages"])
+
+    description_parts = [
+        f"Archon workflow run for '{mapped.get('workflow_name') or 'unknown-workflow'}'.",
+        f"Current Archon status: {mapped.get('status') or 'unknown'}.",
+    ]
+    if mapped.get("codebase_name"):
+        description_parts.append(f"Codebase: {mapped['codebase_name']}.")
+    if user_message:
+        description_parts.append(f"Request: {user_message}")
+    if signals["has_errors"]:
+        error_section = ["Fehler / Warnungen:"]
+        if signals["agents_failed"]:
+            error_section.append(f"Failed agents: {signals['agents_failed']}.")
+        if signals["step_failed"] and raw.get("current_step_name"):
+            error_section.append(f"Failed step: {raw['current_step_name']}.")
+        if accumulated_errors:
+            error_section.append("\n".join(accumulated_errors))
+        description_parts.append("\n".join(error_section))
+
+    raw_metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+    metadata = {
+        "archon_run_id": archon_run_id,
+        "workflow_name": mapped.get("workflow_name"),
+        "archon_status": mapped.get("status"),
+        "user_message": mapped.get("user_message"),
+        "started_at": mapped.get("started_at"),
+        "last_activity_at": mapped.get("last_activity_at"),
+        "completed_at": mapped.get("completed_at"),
+        "codebase_name": mapped.get("codebase_name"),
+        "working_path": mapped.get("working_path"),
+        "agents_total": raw.get("agents_total"),
+        "agents_completed": raw.get("agents_completed"),
+        "agents_failed": signals["agents_failed"],
+        "current_step_name": raw.get("current_step_name"),
+        "current_step_status": raw.get("current_step_status"),
+        "has_errors": signals["has_errors"],
+        "error_count": len(accumulated_errors),
+        "errors": accumulated_errors,
+        # Full Archon run metadata (complete error narrative / output) kept untruncated.
+        "archon_metadata": raw_metadata,
+    }
+
+    tags = [
+        "archon",
+        "workflow-run",
+        mapped.get("workflow_name") or "unknown-workflow",
+        mapped.get("status") or "unknown",
+    ]
+    if signals["has_errors"]:
+        tags.append("has-errors")
+
+    if action is None:
+        action = ActionMemory(
+            title=f"Archon Run: {archon_run_id}",
+            description="\n\n".join(description_parts),
+            action_type="archon_workflow_run",
+            tools_used=json.dumps(["archon", "workflow-monitor"]),
+            status=action_status,
+            is_archived=False,
+            duration_ms=None,
+            output_path=mapped.get("working_path"),
+            metadata_json=json.dumps(metadata),
+            tags=json.dumps(tags),
+            source_kind="archon_run",
+            source_ref=archon_run_id,
+        )
+        db.add(action)
+        return
+
+    action.title = f"Archon Run: {archon_run_id}"
+    action.description = "\n\n".join(description_parts)
+    action.action_type = "archon_workflow_run"
+    action.tools_used = json.dumps(["archon", "workflow-monitor"])
+    action.status = action_status
+    action.output_path = mapped.get("working_path")
+    action.metadata_json = json.dumps(metadata)
+    action.tags = json.dumps(tags)
+    action.updated_at = _now()
+
+
 def _map_run(raw: dict[str, Any]) -> dict[str, Any]:
     """Map raw Archon run data to our snake_case shape."""
     return {
@@ -149,6 +331,7 @@ async def _upsert_runs(db: AsyncSession, raw_runs: list[dict[str, Any]]) -> int:
             synced_at=now,
         )
         db.add(run)
+        await _upsert_run_action_memory(db, raw, mapped)
     await db.commit()
     return len(raw_runs)
 

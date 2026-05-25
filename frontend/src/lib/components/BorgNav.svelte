@@ -9,7 +9,7 @@
 		{ href: '/brain', label: 'Second Brain', icon: '◉' },
 		{ href: '/brain/actions', label: 'Action Memory', icon: '⬢' },
 		{ href: '/brain/vault', label: 'Vault', icon: '◈' },
-		{ href: '/brain/graph', label: 'Knowledge Graph', icon: '⊛' },
+		{ href: '/brain/graph', label: 'Obsidian Graph', icon: '⊛' },
 		{ href: '/tasks', label: 'Task Automation', icon: '◆' },
 		{ href: '/settings', label: 'Settings', icon: '⚙' },
 	];
