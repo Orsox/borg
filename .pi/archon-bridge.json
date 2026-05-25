@@ -1,8 +1,0 @@
-{
-  "enabled": true,
-  "borgosBaseUrl": "http://localhost:1742",
-  "apiUsername": "borg",
-  "apiPassword": "borgborg",
-  "pollIntervalMs": 15000,
-  "suggestionModel": "lm-studio/qwen2.5-7b-instruct"
-}
