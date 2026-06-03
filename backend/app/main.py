@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -25,6 +27,11 @@ from app.task_automation.router import router as task_router
 from app.task_automation.scheduler import init_scheduler, shutdown_scheduler, reload_all_tasks
 from app.auth.service import seed_default_user
 from app.config import settings
+from app.discord_bot.router import set_bot_service, router as locutus_router
+from app.discord_bot.config import BotConfig
+from app.discord_bot.service import DiscordBotService
+from app.discord_bot.listener import TaskEventListener
+from app.discord_bot.bot import BotClient
 from app.database import Base, AsyncSessionLocal, engine
 from app.shared.exceptions import (
     generic_exception_handler,
@@ -33,6 +40,75 @@ from app.shared.exceptions import (
 )
 
 START_TIME = time.time()
+
+# Global references for Discord Bot lifecycle management
+_bot_service: DiscordBotService | None = None
+_sse_listener: TaskEventListener | None = None
+_bot_client: BotClient | None = None
+
+
+async def _init_discord_bot() -> None:
+    """Initialisiere Locutus Discord-Bot."""
+    global _bot_service, _sse_listener, _bot_client
+
+    config = BotConfig.from_env()
+    errors = config.validate()
+    if errors:
+        logger.warning(f"Discord Bot config errors: {errors}")
+        return
+
+    if not config.enabled:
+        logger.info("Discord Bot disabled (DISCORD_BOT_ENABLED=false)")
+        return
+
+    try:
+        # Service initialisieren
+        _bot_service = DiscordBotService(config)
+        await _bot_service.start()
+        set_bot_service(_bot_service)
+
+        # Bot-Client initialisieren
+        _bot_client = BotClient(config=config, service=_bot_service)
+
+        # SSE-Listener initialisieren — sendet Notifications an Discord
+        async def notification_callback(content: str) -> None:
+            """Callback für Task-Notifications."""
+            if _bot_client and _bot_client.is_ready():
+                await _bot_client.send_notification(content)
+            else:
+                logger.info(f"Notification (bot not ready): {content}")
+
+        _sse_listener = TaskEventListener(notification_callback)
+        await _sse_listener.start()
+
+        # Bot verbinden
+        token = config.token
+        if not token:
+            logger.warning("DISCORD_BOT_TOKEN is empty — not connecting to Discord")
+            return
+
+        logger.info("Starting BotClient...")
+        await _bot_client.start(token)
+        logger.info("Discord Bot 'Locutus' initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize Discord Bot: {e}")
+
+
+async def _shutdown_discord_bot() -> None:
+    """Shutdown Locutus Discord-Bot."""
+    global _bot_service, _sse_listener, _bot_client
+
+    if _sse_listener:
+        await _sse_listener.stop()
+        logger.info("TaskEventListener stopped")
+
+    if _bot_client:
+        await _bot_client.close()
+        logger.info("BotClient closed")
+
+    if _bot_service:
+        await _bot_service.stop()
+        logger.info("DiscordBotService stopped")
 
 
 def _ensure_db_dir() -> None:
@@ -78,11 +154,17 @@ async def lifespan(app: FastAPI):
     await init_scheduler()
     await reload_all_tasks()
 
+    # Initialize Discord Bot (Locutus)
+    await _init_discord_bot()
+
     yield
 
     # Shutdown scheduler
     await shutdown_scheduler()
     await engine.dispose()
+
+    # Shutdown Discord Bot
+    await _shutdown_discord_bot()
 
 
 app = FastAPI(
@@ -114,6 +196,7 @@ app.include_router(brain_router)
 app.include_router(action_router)
 app.include_router(task_router)
 app.include_router(vault_router)
+app.include_router(locutus_router)
 
 
 @app.get("/api/health")

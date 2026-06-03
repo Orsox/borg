@@ -1,3 +1,7 @@
+import os
+from typing import Optional
+
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,6 +16,14 @@ class Settings(BaseSettings):
     archon_api_url: str = "http://localhost:3090"
     cors_origins: str = "http://localhost:5173"
 
+    # Discord Bot Configuration
+    discord_bot_enabled: bool = Field(default=False, description="Discord Bot aktivieren")
+    discord_bot_token: str = Field(default="", description="Discord Bot Token")
+    discord_bot_channel_id: Optional[int] = Field(default=None, description="Discord Channel ID")
+    discord_bot_allowed_user_ids: str = Field(default="", description="Comma-separated Discord User IDs")
+    discord_bot_prefix: str = Field(default="!", description="Message Prefix")
+    discord_bot_mention_prefix: str = Field(default="@Locutus", description="@-Erwähnung Prefix")
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -21,6 +33,16 @@ class Settings(BaseSettings):
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",")]
+
+    @property
+    def discord_bot_allowed_user_ids_list(self) -> list[int]:
+        if not self.discord_bot_allowed_user_ids.strip():
+            return []
+        return [
+            int(uid.strip())
+            for uid in self.discord_bot_allowed_user_ids.split(",")
+            if uid.strip()
+        ]
 
 
 settings = Settings()
