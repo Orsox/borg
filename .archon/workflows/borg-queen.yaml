@@ -3,12 +3,12 @@
 # ═════════════════════════════════════════════════════════════════════
 #
 # Kostenbewusste Modell-Routing-Strategie:
-#   Claude Opus 4.7 → Planen (großer Kontext, zuverlässig)
+#   Qwen3.6-35B-A3B-MTP → Planen (großer Kontext, zuverlässig)
 #   Qwen3.6  → Implementieren + Self-Review (starkes Thinking, lokal)
-#   Gemma4   → Confirm, Git, PR-Orchestrierung (schnelle Tool-Calls, lokal)
+#   Qwen3.5-9B   → Confirm, Git, PR-Orchestrierung (schnelle Tool-Calls, lokal)
 #   Wichtig: Loop-Nodes ignorieren node-level model/provider; workflow default bleibt Qwen.
-#   Claude Opus → Unabhängiges Review nach dem Loop
-#   GPT 5.5  → Final-Review mit hohem Reasoning
+#   Qwen3.6-27B-MTP → Unabhängiges Review nach dem Loop
+#   Qwen3.6-27B-MTP  → Final-Review mit hohem Reasoning
 #
 # Loop-Pattern (inspiriert von archon-adversarial-dev):
 #   Jeder Loop-Durchlauf (fresh context):
@@ -17,7 +17,7 @@
 #     3. Findings → $ARTIFACTS_DIR/review/ → nächster Zyklus
 #     4. Bis Self-Review passt oder max 3 Zyklen erreicht
 #
-# Nach Loop: Claude Opus reviewt → GPT 5.5 final reviewt → PR fertig
+# Nach Loop: Qwen3.6-27B-MTP reviewt → Qwen3.6-27B-MTP final reviewt → PR fertig
 # ═════════════════════════════════════════════════════════════════════
 
 name: borg-queen
@@ -26,31 +26,31 @@ description: |
   with local-first model routing and adversarial review cycles.
 
   Local-first workflow that maximizes local model usage:
-  - Claude Opus 4.7 for reliable planning with a large context window
+  - Qwen3.6-35B-A3B-MTP for reliable planning with a large context window
   - Qwen3.6 (local) for implementation and self-review with deep thinking
-  - Gemma4 (local) for fast confirm/git/PR orchestration tasks
-  - Claude Opus for independent high-quality review after implementation loop
-  - GPT 5.5 with high reasoning for final review
+  - Qwen3.5-9B (local) for fast confirm/git/PR orchestration tasks
+  - Qwen3.6-27B-MTP for independent high-quality review after implementation loop
+  - Qwen3.6-27B-MTP with high reasoning for final review
 
   Input: Feature description in natural language, or path to a PRD file
   Output: PR ready for merge with comprehensive review completed
 
   Full workflow:
-  1. Claude Opus 4.7 creates comprehensive implementation plan
+  1. Qwen3.6-35B-A3B-MTP creates comprehensive implementation plan
   2. Qwen3.6 sets up implementation scope/dependencies when code changes may happen
   3. Review-Implement Loop (max 3 cycles):
      - Qwen3.6 implements tasks (or fixes self-review findings)
      - Qwen3.6 performs strict self-review
      - On review failure: findings flow back to Qwen for next cycle
-  4. Claude Opus performs independent review of final implementation
-  5. GPT 5.5 performs final review with high reasoning
-  6. Gemma4 finalizes PR
+  4. Qwen3.6-27B-MTP performs independent review of final implementation
+  5. Qwen3.6-27B-MTP performs final review with high reasoning
+  6. Qwen3.5-9B finalizes PR
   7. Qwen3.6 generates workflow summary
 
   NOT for: Executing existing plans (use archon-plan-to-pr), quick fixes, standalone reviews.
 
 provider: pi
-model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
+model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
 
 nodes:
   # ═══════════════════════════════════════════════════════════════════
@@ -77,7 +77,7 @@ nodes:
     timeout: 10000
 
   # ═══════════════════════════════════════════════════════════════════
-  # PHASE 1: CREATE PLAN — Claude Opus 4.7 für zuverlässiges Planning
+  # PHASE 1: CREATE PLAN — Qwen3.6-35B-A3B-MTP für zuverlässiges Planning
   # ═══════════════════════════════════════════════════════════════════
 
   - id: create-plan
@@ -85,9 +85,9 @@ nodes:
     depends_on: [state-init]
     context: fresh
     # Planning needs a large, reliable context window. Keep implementation local,
-    # but use Claude Opus 4.7 here to avoid LM Studio/Qwen SDK timeouts.
-    provider: claude
-    model: claude-opus-4-7
+    # but use Qwen3.6-35B-A3B-MTP here to avoid LM Studio/Qwen SDK timeouts.
+    provider: pi
+    model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
     effort: high
     thinking: enabled
     idle_timeout: 1800000
@@ -102,7 +102,7 @@ nodes:
     context: fresh
     # This command may edit dependency/code files; keep it on Qwen, never Opus.
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
+    model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
     idle_timeout: 1800000
 
   - id: confirm-plan
@@ -110,7 +110,7 @@ nodes:
     depends_on: [plan-setup]
     context: fresh
     provider: pi
-    model: lm-studio/qwen2.5-7b-instruct
+    model: lm-studio/qwen/qwen3.5-9b
     idle_timeout: 1800000
 
   # ═══════════════════════════════════════════════════════════════════
@@ -123,7 +123,7 @@ nodes:
   #   3. Findings → $ARTIFACTS_DIR/review/ → nächster Zyklus
   #   4. Bis Self-Review passt oder max 3 Zyklen erreicht
   #
-  # Nach dem Loop: Claude Opus macht unabhängiges Review (Phase 3b)
+  # Nach dem Loop: Qwen3.6-27B-MTP macht unabhängiges Review (Phase 3b)
   #
   # State-Dateien:
   #   $ARTIFACTS_DIR/state.json            → Zyklus-Zähler, Review-Status
@@ -207,16 +207,16 @@ nodes:
     timeout: 30000
 
   # ═══════════════════════════════════════════════════════════════════
-  # PHASE 3b: CLAUDE OPUS INDEPENDENT REVIEW
+  # PHASE 3b: QWEN3.6-27B-MTP INDEPENDENT REVIEW
   #
-  # Nach dem Loop reviewt Claude Opus die Implementation unabhängig.
-  # Dies ist das hochwertige Review-Gate — Claude Opus hat die
+  # Nach dem Loop reviewt Qwen3.6-27B-MTP die Implementation unabhängig.
+  # Dies ist das hochwertige Review-Gate — Qwen3.6-27B-MTP hat die
   # volle Codebasis und alle Review-Artifacts im Kontext.
   # ═══════════════════════════════════════════════════════════════════
 
   - id: claude-review
     prompt: |
-      # Claude Opus — Independent Code Review
+      # Qwen3.6-27B-MTP — Independent Code Review
 
       You are performing an independent, high-quality code review.
       **Think deeply and be thorough.** This is the quality gate.
@@ -252,7 +252,7 @@ nodes:
 
       Write your review to `$ARTIFACTS_DIR/review/claude-opus.md`:
       ```markdown
-      # Claude Opus Review
+      # Qwen3.6-27B-MTP Review
 
       ## Verdict: PASS / FAIL
 
@@ -280,19 +280,19 @@ nodes:
       Be critical. A PASS means the code is genuinely ready for merge.
     depends_on: [review-loop]
     context: fresh
-    provider: claude
-    model: opus
+    provider: pi
+    model: lm-studio/qwen3.6-27b-mtp
     effort: high
     thinking: enabled
     idle_timeout: 1800000
 
   # ═══════════════════════════════════════════════════════════════════
-  # PHASE 4: FINAL REVIEW — GPT 5.5 mit hohem Reasoning
+  # PHASE 4: FINAL REVIEW — Qwen3.6-27B-MTP mit hohem Reasoning
   # ═══════════════════════════════════════════════════════════════════
 
   - id: final-review
     prompt: |
-      # Final Review — GPT 5.5
+      # Final Review — Qwen3.6-27B-MTP
 
       You are performing the FINAL review of this implementation.
       **Use high-level reasoning. Think deeply and thoroughly.**
@@ -302,7 +302,7 @@ nodes:
       ### 1. Load Context
       Read the following artifacts:
       - `$ARTIFACTS_DIR/implementation.md` — implementation summary
-      - `$ARTIFACTS_DIR/review/claude-opus.md` — Claude Opus review findings
+      - `$ARTIFACTS_DIR/review/claude-opus.md` — Qwen3.6-27B-MTP review findings
       - `$ARTIFACTS_DIR/review/self-review.md` — Qwen self-review
       - `$ARTIFACTS_DIR/state.json` — loop state (cycle count, review status)
 
@@ -322,8 +322,8 @@ nodes:
       - Test coverage
       - Documentation
       - Edge cases and error handling
-      - Cross-reference with Claude Opus and self-review findings
-      - Verify Claude Opus findings were addressed (if any)
+      - Cross-reference with Qwen3.6-27B-MTP and self-review findings
+      - Verify Qwen3.6-27B-MTP findings were addressed (if any)
 
       ### 4. Write Review
       Write your comprehensive review to `$ARTIFACTS_DIR/review/final-review.md`
@@ -332,17 +332,17 @@ nodes:
       Be thorough. This is the last gate before the PR is finalized.
     depends_on: [claude-review]
     context: fresh
-    # GPT 5.5 was requested originally, but Pi/OpenAI does not currently expose
-    # model `gpt-5.5` in this environment. Use a validated high-quality fallback
-    # so the workflow can resume; implementation remains on Qwen.
-    provider: claude
-    model: sonnet
+    # Qwen3.6-27B-MTP is the approved final-review model; keep the last gate local and deterministic.
+    # keep the final gate on an approved local model from the curated Pi catalog
+    # while implementation remains on Qwen.
+    provider: pi
+    model: lm-studio/qwen3.6-27b-mtp
     effort: high
     thinking: enabled
     idle_timeout: 1800000
 
   # ═══════════════════════════════════════════════════════════════════
-  # PHASE 5: FINALIZE PR — Gemma4 für Git/PR Orchestrierung
+  # PHASE 5: FINALIZE PR — Qwen3.5-9B für Git/PR Orchestrierung
   # ═══════════════════════════════════════════════════════════════════
 
   - id: finalize-pr
@@ -350,7 +350,7 @@ nodes:
     depends_on: [final-review]
     context: fresh
     provider: pi
-    model: lm-studio/qwen2.5-7b-instruct
+    model: lm-studio/qwen/qwen3.5-9b
     idle_timeout: 1800000
 
   # ═══════════════════════════════════════════════════════════════════
@@ -362,5 +362,5 @@ nodes:
     depends_on: [finalize-pr]
     context: fresh
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
+    model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
     idle_timeout: 1800000

@@ -3,9 +3,9 @@
 # ═════════════════════════════════════════════════════════════════════
 # Inspired by the default archon-fix-github-issue workflow, adapted for BorgOS:
 # - deterministic shell nodes for GitHub, git, validation, and artifact plumbing
-# - Claude for issue-aware planning and final synthesis
+# - Qwen3.6-27B-MTP for issue-aware planning and final synthesis
 # - Qwen3.6 local model for implementation and targeted fixes
-# - Gemma4 local model for small, parallel review probes
+# - Qwen3.5-9B for classification and small review probes
 # - explicit artifacts between all fresh-context nodes
 # - optional Action Memory artifact for the Borg Second Brain
 # ═════════════════════════════════════════════════════════════════════
@@ -16,26 +16,26 @@ description: |
 
   Use when: The user wants to fix, resolve, or implement a GitHub issue in the BorgOS repository.
   Triggers: "borg nanoprobe", "nanoprobe issue", "fix issue with Borg", "fix #123 locally",
-            "use Borg Nanoprobe", "repair issue with Qwen and Gemma".
+            "use Borg Nanoprobe", "repair issue with Qwen".
 
   What it does:
   1. Extracts and fetches a GitHub issue deterministically with the GitHub CLI.
-  2. Classifies the issue with local Gemma4.
+  2. Classifies the issue with local Qwen3.5-9B.
   3. Scans the repository deterministically for likely affected files.
   4. Runs Qwen3.6 bug triage before any fix work and labels the GitHub issue.
   5. Continues only when Qwen confirms this is a real bug.
-  6. Creates an issue-aware fix plan with Claude.
+  6. Creates an issue-aware fix plan with Qwen3.6-27B-MTP.
   7. Implements the fix with local Qwen3.6.
   8. Runs deterministic validation and lets Qwen fix validation failures.
-  9. Runs parallel Gemma4 nanoprobe reviews for scope, error handling, tests, and UI/UX.
-  10. Synthesizes review findings with Claude and lets Qwen fix critical/high findings.
-  11. Performs final validation and final Claude review.
+  9. Runs parallel Qwen3.5-9B nanoprobe reviews for scope, error handling, tests, and UI/UX.
+  10. Synthesizes review findings with Qwen3.6-27B-MTP and lets Qwen fix critical/high findings.
+  11. Performs final validation and a final Qwen3.6-27B-MTP review.
   12. Creates a draft PR and writes a Borg Action Memory artifact.
 
   Model routing:
-  - Gemma4 local: classification and small parallel review probes.
+  - Qwen3.5-9B local: classification and small parallel review probes.
   - Qwen3.6 local: bug triage, implementation, and targeted fixes.
-  - Claude Sonnet: planning, review synthesis, and final gate.
+  - Qwen3.6-27B-MTP: planning, review synthesis, and final gate.
   - No GPT model is referenced by default; add one only after validating the installed model catalog.
 
   Input: A GitHub issue reference such as "Fix issue #123".
@@ -44,7 +44,7 @@ description: |
   NOT for: broad greenfield features without a GitHub issue, architecture-only reviews, or long multi-epic projects.
 
 provider: pi
-model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
+model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
 worktree:
   enabled: true
 
@@ -115,8 +115,8 @@ nodes:
     depends_on: [fetch-issue]
     context: fresh
     provider: pi
-    model: lm-studio/qwen2.5-7b-instruct
-    idle_timeout: 600000
+    model: lm-studio/qwen/qwen3.5-9b
+    idle_timeout: 1800000
     allowed_tools: []
     prompt: |
       You are a concise GitHub issue classifier for BorgOS.
@@ -215,8 +215,8 @@ nodes:
     depends_on: [repo-scan]
     context: fresh
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
-    idle_timeout: 1200000
+    model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
+    idle_timeout: 1800000
     prompt: |
       # Borg Nanoprobe — Qwen Bug Triage
 
@@ -355,11 +355,11 @@ nodes:
     depends_on: [set-github-triage-label]
     when: "$qwen-bug-triage.output.decision == 'confirmed_bug'"
     context: fresh
-    provider: claude
-    model: sonnet
+    provider: pi
+    model: lm-studio/qwen3.6-27b-mtp
     effort: high
     thinking: enabled
-    idle_timeout: 1200000
+    idle_timeout: 1800000
     prompt: |
       # Borg Nanoprobe — Issue Triage and Fix Plan
 
@@ -405,7 +405,7 @@ nodes:
       that a fresh-context Qwen agent can execute without prior memory.
 
       Write `$ARTIFACTS_DIR/plan/review-focus.md` with the exact review questions
-      Gemma and Claude should answer after implementation.
+      Qwen review stages should answer after implementation.
 
       End with `<promise>BORG_NANOPROBE_PLAN_COMPLETE</promise>`.
 
@@ -427,7 +427,7 @@ nodes:
     depends_on: [verify-plan]
     context: fresh
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
+    model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
     idle_timeout: 1800000
     prompt: |
       # Borg Nanoprobe — Qwen Implementation
@@ -535,7 +535,7 @@ nodes:
     depends_on: [validate]
     context: fresh
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
+    model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
     idle_timeout: 1800000
     prompt: |
       # Borg Nanoprobe — Fix Validation Failures
@@ -607,19 +607,19 @@ nodes:
     timeout: 600000
 
   # ═══════════════════════════════════════════════════════════════════
-  # PHASE 7: PARALLEL GEMMA NANOPROBE REVIEWS
+  # PHASE 7: PARALLEL QWEN3.5-9B NANOPROBE REVIEWS
   # ═══════════════════════════════════════════════════════════════════
 
   - id: scope-review
     depends_on: [revalidate]
     context: fresh
     provider: pi
-    model: lm-studio/qwen2.5-7b-instruct
-    idle_timeout: 900000
+    model: lm-studio/qwen/qwen3.5-9b
+    idle_timeout: 1800000
     prompt: |
       # Borg Nanoprobe — Scope Review
 
-      You are Gemma4 performing a narrow scope review.
+      You are Qwen3.5-9B performing a narrow scope review.
 
       Required reads:
       - `$ARTIFACTS_DIR/issue/issue.json`
@@ -640,12 +640,12 @@ nodes:
     depends_on: [revalidate]
     context: fresh
     provider: pi
-    model: lm-studio/qwen2.5-7b-instruct
-    idle_timeout: 900000
+    model: lm-studio/qwen/qwen3.5-9b
+    idle_timeout: 1800000
     prompt: |
       # Borg Nanoprobe — Error Handling Review
 
-      You are Gemma4 reviewing error handling and data safety.
+      You are Qwen3.5-9B reviewing error handling and data safety.
 
       Required reads:
       - `$ARTIFACTS_DIR/plan/review-focus.md`
@@ -672,12 +672,12 @@ nodes:
     depends_on: [revalidate]
     context: fresh
     provider: pi
-    model: lm-studio/qwen2.5-7b-instruct
-    idle_timeout: 900000
+    model: lm-studio/qwen/qwen3.5-9b
+    idle_timeout: 1800000
     prompt: |
       # Borg Nanoprobe — Test Gap Review
 
-      You are Gemma4 reviewing test coverage risk.
+      You are Qwen3.5-9B reviewing test coverage risk.
 
       Required reads:
       - `$ARTIFACTS_DIR/issue/issue.json`
@@ -704,12 +704,12 @@ nodes:
     depends_on: [revalidate]
     context: fresh
     provider: pi
-    model: lm-studio/qwen2.5-7b-instruct
-    idle_timeout: 900000
+    model: lm-studio/qwen/qwen3.5-9b
+    idle_timeout: 1800000
     prompt: |
       # Borg Nanoprobe — Frontend UX Review
 
-      You are Gemma4 reviewing UI/UX only if the diff touches frontend files.
+      You are Qwen3.5-9B reviewing UI/UX only if the diff touches frontend files.
       If no frontend files changed, write a short PASS report explaining that the review is not applicable.
 
       Required reads:
@@ -739,15 +739,15 @@ nodes:
     depends_on: [scope-review, error-handling-review, test-gap-review, frontend-ux-review]
     trigger_rule: none_failed_min_one_success
     context: fresh
-    provider: claude
-    model: sonnet
+    provider: pi
+    model: lm-studio/qwen3.6-27b-mtp
     effort: high
     thinking: enabled
-    idle_timeout: 1200000
+    idle_timeout: 1800000
     prompt: |
       # Borg Nanoprobe — Review Synthesis
 
-      You are Claude synthesizing Gemma nanoprobe reviews into an actionable fix list.
+      You are Qwen3.6-27B-MTP synthesizing Qwen3.5-9B nanoprobe reviews into an actionable fix list.
 
       Required reads:
       - `$ARTIFACTS_DIR/reviews/scope-review.md`
@@ -770,7 +770,7 @@ nodes:
     depends_on: [synthesize-reviews]
     context: fresh
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
+    model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
     idle_timeout: 1800000
     prompt: |
       # Borg Nanoprobe — Qwen Review Fixes
@@ -845,11 +845,11 @@ nodes:
   - id: final-review
     depends_on: [final-validation]
     context: fresh
-    provider: claude
-    model: sonnet
+    provider: pi
+    model: lm-studio/qwen3.6-27b-mtp
     effort: high
     thinking: enabled
-    idle_timeout: 1200000
+    idle_timeout: 1800000
     prompt: |
       # Borg Nanoprobe — Final Review Gate
 
@@ -883,8 +883,8 @@ nodes:
     depends_on: [final-review]
     context: fresh
     provider: pi
-    model: lm-studio/qwen2.5-7b-instruct
-    idle_timeout: 900000
+    model: lm-studio/qwen/qwen3.5-9b
+    idle_timeout: 1800000
     prompt: |
       # Borg Nanoprobe — Create Draft PR
 
@@ -938,7 +938,7 @@ nodes:
       $FINAL
       \`\`\`
 
-      Artifacts were generated for planning, implementation, validation, parallel Gemma reviews, and final review.
+      Artifacts were generated for planning, implementation, validation, parallel Qwen3.5-9B reviews, and final review.
       EOF
       if [ -n "$ISSUE_NUM" ]; then
         gh issue comment "$ISSUE_NUM" --body-file "$BODY" >/dev/null 2>&1 || true
@@ -968,7 +968,7 @@ nodes:
           'title': f'Borg Nanoprobe issue #{issue}',
           'description': 'Ran the Borg Nanoprobe local-first GitHub issue repair workflow.',
           'action_type': 'github_issue_fix',
-          'tools_used': ['archon', 'gh', 'git', 'qwen3.6', 'gemma4', 'claude-sonnet'],
+          'tools_used': ['archon', 'gh', 'git', 'qwen3.5-9b', 'qwen3.6-27b-mtp', 'qwen3.6-35b-a3b-mtp'],
           'status': status,
           'output_path': pr_url or None,
           'metadata': {
@@ -991,8 +991,8 @@ nodes:
     depends_on: [action-memory-artifact]
     context: fresh
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
-    idle_timeout: 900000
+    model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
+    idle_timeout: 1800000
     prompt: |
       # Borg Nanoprobe — Workflow Summary
 

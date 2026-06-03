@@ -8,18 +8,18 @@
 #
 # Referenz: https://claude.com/blog/how-claude-code-works-in-large-codebases-best-practices-and-where-to-start
 #
-# Model-Routing (lokal-first, Review-only-Claude):
-#   qwen2.5-7b-instruct (lokal) → bis zu 4 parallele Analyse-Subagenten
-#                                  (idle_timeout 5 min, kleines Modell, VRAM-schonend)
-#   qwen3.6-27b         (lokal) → Dokumentation generieren, sequenziell
-#                                  (idle_timeout 10 min, grosses Modell, nur 1 Instanz)
-#   Claude Sonnet               → AUSSCHLIESSLICH abschliessende Quality-Review
+# Model-Routing (lokal-first, Qwen-only):
+#   qwen3.5-9b (lokal) → bis zu 4 parallele Analyse-Subagenten
+#                                  (idle_timeout 30 min, konsistent mit allen Workflows)
+#   qwen3.6-27b-mtp     (lokal) → Dokumentation generieren, sequenziell
+#                                  (idle_timeout 30 min, grosses Modell, nur 1 Instanz)
+#   Qwen3.6-35B-A3B-MTP       → abschliessende Quality-Review
 #
 # Architektur-Entscheidung:
 #   Kein Loop-Node — Loops erben den Workflow-Default und ignorieren node-level
 #   model/provider; LM-Studio timeouted intern bei schweren Loop-Iterationen.
-#   Stattdessen: deterministisches Sharding (bash) → parallele qwen2.5-Analyse
-#   → ein qwen3.6-Generierungspass aus vorverdauten Analysen. Das hält jeden
+#   Stattdessen: deterministisches Sharding (bash) → parallele qwen3.5-9b-Analyse
+#   → ein qwen3.6-mtp-Generierungspass aus vorverdauten Analysen. Das hält jeden
 #   einzelnen Node leicht und unterhalb der LM-Studio-Timeouts.
 # ═════════════════════════════════════════════════════════════════════
 
@@ -33,11 +33,11 @@ description: |
 
   Does:
   1. Scans the repo for all code modules and splits them into 4 shards (deterministic bash).
-  2. Up to 4 parallel qwen2.5-7b analysis subagents read their shard and write factual
+  2. Up to 4 parallel qwen3.5-9b analysis subagents read their shard and write factual
      per-module analyses (purpose, public API, data models, deps, config, pitfalls).
-  3. A single sequential qwen3.6-27b pass writes the missing CLAUDE.md / borg-cube.md
+  3. A single sequential qwen3.6-27b-mtp pass writes the missing CLAUDE.md / borg-cube.md
      files from the pre-computed analyses.
-  4. Claude Sonnet performs the final quality-review (the only Claude usage).
+  4. Qwen3.6-35B-A3B-MTP performs the final quality-review.
   5. Reports what was created.
 
   CLAUDE.md  — Agent rules: build commands, conventions, architecture decisions,
@@ -50,7 +50,7 @@ description: |
            modifying existing documentation.
 
 provider: pi
-model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
+model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
 worktree:
   enabled: true
 
@@ -201,10 +201,10 @@ nodes:
     timeout: 30000
 
   # ═══════════════════════════════════════════════════════════════════
-  # PHASE 2: PARALLELE ANALYSE — 4× qwen2.5-7b-instruct (Subagenten)
+  # PHASE 2: PARALLELE ANALYSE — 4× qwen3.5-9b (Subagenten)
   #
   # Alle 4 Nodes laufen in derselben DAG-Layer → echte Parallelität.
-  # Kleines Modell, simple und konkrete Instruktionen, 5-min idle_timeout.
+  # Kleines Modell, simple und konkrete Instruktionen, 30-min idle_timeout.
   # Leere Shards (weniger als 4 Module) werden sauber übersprungen.
   # ═══════════════════════════════════════════════════════════════════
 
@@ -212,8 +212,8 @@ nodes:
     depends_on: [scan-modules]
     context: fresh
     provider: pi
-    model: lm-studio/qwen2.5-7b-instruct
-    idle_timeout: 300000
+    model: lm-studio/qwen/qwen3.5-9b
+    idle_timeout: 1800000
     prompt: |
       # Borg Sanitizer — Code Analysis (Shard 0)
 
@@ -263,8 +263,8 @@ nodes:
     depends_on: [scan-modules]
     context: fresh
     provider: pi
-    model: lm-studio/qwen2.5-7b-instruct
-    idle_timeout: 300000
+    model: lm-studio/qwen/qwen3.5-9b
+    idle_timeout: 1800000
     prompt: |
       # Borg Sanitizer — Code Analysis (Shard 1)
 
@@ -314,8 +314,8 @@ nodes:
     depends_on: [scan-modules]
     context: fresh
     provider: pi
-    model: lm-studio/qwen2.5-7b-instruct
-    idle_timeout: 300000
+    model: lm-studio/qwen/qwen3.5-9b
+    idle_timeout: 1800000
     prompt: |
       # Borg Sanitizer — Code Analysis (Shard 2)
 
@@ -365,8 +365,8 @@ nodes:
     depends_on: [scan-modules]
     context: fresh
     provider: pi
-    model: lm-studio/qwen2.5-7b-instruct
-    idle_timeout: 300000
+    model: lm-studio/qwen/qwen3.5-9b
+    idle_timeout: 1800000
     prompt: |
       # Borg Sanitizer — Code Analysis (Shard 3)
 
@@ -425,8 +425,8 @@ nodes:
     trigger_rule: all_done
     context: fresh
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
-    idle_timeout: 600000
+    model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
+    idle_timeout: 1800000
     prompt: |
       # Borg Sanitizer — Modul-Dokumentation generieren
 
@@ -514,21 +514,21 @@ nodes:
     timeout: 30000
 
   # ═══════════════════════════════════════════════════════════════════
-  # PHASE 5: FINAL REVIEW — Claude Sonnet (einzige Claude-Nutzung)
+  # PHASE 5: FINAL REVIEW — Qwen3.6-35B-A3B-MTP
   # ═══════════════════════════════════════════════════════════════════
 
   - id: final-review
     depends_on: [collect-diff]
     context: fresh
-    provider: claude
-    model: sonnet
+    provider: pi
+    model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
     effort: high
-    idle_timeout: 900000
+    idle_timeout: 1800000
     prompt: |
       # Borg Sanitizer — Final Review
 
       Du bist der finale Reviewer. Prüfe die generierten Dokumentationsdateien
-      auf Qualität und Korrektheit. Dies ist die einzige Claude-Stufe.
+      auf Qualität und Korrektheit. Dies ist die abschließende Qwen-Stufe.
 
       ## Kontext laden
       - `$ARTIFACTS_DIR/review/diff.md` — welche Dateien erstellt wurden

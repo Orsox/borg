@@ -16,27 +16,106 @@ description: |
 
   Does:
   1. Qwen 3.6 drafts a pre-plan / architecture plan.
-  2. Claude Opus 4.7 reviews that draft from fresh context only and raises questions.
+  2. Qwen 3.6 27B MTP reviews that draft from fresh context only and raises ordered plan questions.
   3. The user approves or responds to the review gate.
-  4. Qwen finalizes the plan and generates sequential execution subtasks.
+  4. Qwen finalizes the plan and generates sequential execution subtasks after interactive answers.
   5. Qwen processes exactly one subtask per loop iteration with fresh context.
   6. Runs deterministic validation.
-  7. Claude Opus 4.7 performs the final whole-system review.
+  7. Qwen performs the final whole-system review with the approved local model set.
   8. Finalizes a PR and writes a workflow summary.
 
   NOT for: tiny one-file fixes, quick questions, standalone PR review, or workflows where broad parallel fan-out is desired.
 
 provider: pi
-model: lm-studio/qwen2.5-7b-instruct
+model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
 interactive: true
 worktree:
   enabled: true
+
+x-no-find-hook: &no_find_hook
+  PreToolUse:
+    - matcher: "Bash|find"
+      response:
+        hookSpecificOutput:
+          hookEventName: PreToolUse
+          permissionDecision: deny
+          permissionDecisionReason: "Do not use find in this workflow. Use rg --files, git ls-files, grep, ls, or Python pathlib instead."
+      timeout: 30
 
 nodes:
   - id: init
     bash: |
       set -euo pipefail
-      mkdir -p "$ARTIFACTS_DIR/tasks" "$ARTIFACTS_DIR/reviews" "$ARTIFACTS_DIR/fixes" "$ARTIFACTS_DIR/final" "$ARTIFACTS_DIR/logs"
+      mkdir -p "$ARTIFACTS_DIR/tasks" "$ARTIFACTS_DIR/reviews" "$ARTIFACTS_DIR/fixes" "$ARTIFACTS_DIR/final" "$ARTIFACTS_DIR/logs" "$ARTIFACTS_DIR/bin"
+      cat > "$ARTIFACTS_DIR/bin/find" << 'EOF'
+      #!/usr/bin/env bash
+      echo "ERROR: find is disabled in this workflow. Use rg --files, git ls-files, grep, ls, or Python pathlib instead." >&2
+      exit 64
+      EOF
+      chmod +x "$ARTIFACTS_DIR/bin/find"
+      cat > "$ARTIFACTS_DIR/bin/select_next_task.py" << 'PY'
+      import copy, json, os, sys
+      art = os.environ['ARTIFACTS_DIR']
+      path = os.path.join(art, 'task-list.json')
+      data = json.load(open(path, encoding='utf-8'))
+      tasks = data.get('tasks') or []
+      terminal = {'done', 'blocked'}
+      selected = None
+      for task in tasks:
+          if task.get('status') != 'pending':
+              continue
+          deps = task.get('dependsOn') or []
+          dep_status = {t.get('id'): t.get('status') for t in tasks}
+          if all(dep_status.get(dep) in terminal for dep in deps):
+              selected = task
+              break
+      if selected is None:
+          open_tasks = [t for t in tasks if t.get('status') not in terminal]
+          json.dump({'selected': None, 'openTaskCount': len(open_tasks)}, open(os.path.join(art, 'current-task.json'), 'w', encoding='utf-8'), indent=2)
+          print('NO_ELIGIBLE_TASK')
+          sys.exit(0)
+      before = copy.deepcopy(data)
+      selected['status'] = 'in_progress'
+      current = {
+          'selected': selected.get('id'),
+          'task': selected,
+          'handoff': os.path.join(art, 'tasks', f"{selected.get('id')}.md"),
+      }
+      json.dump(before, open(os.path.join(art, 'task-list.before-current.json'), 'w', encoding='utf-8'), indent=2)
+      json.dump(data, open(path, 'w', encoding='utf-8'), indent=2)
+      json.dump(current, open(os.path.join(art, 'current-task.json'), 'w', encoding='utf-8'), indent=2)
+      print(f"SELECTED_TASK={selected.get('id')}")
+      PY
+      cat > "$ARTIFACTS_DIR/bin/guard_current_task.py" << 'PY'
+      import json, os, sys
+      art = os.environ['ARTIFACTS_DIR']
+      cur = json.load(open(os.path.join(art, 'current-task.json'), encoding='utf-8'))
+      tid = cur.get('selected')
+      if not tid:
+          print('NO_TASK_SELECTED')
+          sys.exit(0)
+      before = json.load(open(os.path.join(art, 'task-list.before-current.json'), encoding='utf-8'))
+      after = json.load(open(os.path.join(art, 'task-list.json'), encoding='utf-8'))
+      before_by_id = {t.get('id'): t for t in before.get('tasks', [])}
+      after_by_id = {t.get('id'): t for t in after.get('tasks', [])}
+      if set(before_by_id) != set(after_by_id):
+          raise SystemExit('Task ids changed during one-task iteration')
+      changed = []
+      for task_id, before_task in before_by_id.items():
+          after_task = after_by_id[task_id]
+          if task_id == tid:
+              if after_task.get('status') not in {'done', 'blocked'}:
+                  raise SystemExit(f'{tid} must end as done or blocked, got {after_task.get("status")}')
+              continue
+          if after_task != before_task:
+              changed.append(task_id)
+      if changed:
+          raise SystemExit(f'Only {tid} may change in one iteration; changed={changed}')
+      result = {'task': tid, 'status': after_by_id[tid].get('status'), 'guard': 'pass'}
+      json.dump(result, open(os.path.join(art, 'task-guard.json'), 'w', encoding='utf-8'), indent=2)
+      print(json.dumps(result))
+      PY
+      chmod +x "$ARTIFACTS_DIR/bin/select_next_task.py" "$ARTIFACTS_DIR/bin/guard_current_task.py"
       cat > "$ARTIFACTS_DIR/state.json" << 'EOF'
       {
         "status": "initialized",
@@ -58,8 +137,9 @@ nodes:
     depends_on: [init]
     context: fresh
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
-    idle_timeout: 7200000
+    model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
+    denied_tools: [find]
+    idle_timeout: 1800000
     retry:
       max_attempts: 4
       delay_ms: 5000
@@ -67,15 +147,23 @@ nodes:
     prompt: |
       # Borg System Architekt — Draft Architecture Plan
 
-      You are Qwen 3.6 27B acting as the initial planner.
+      You are Qwen 3.6 35B acting as the initial planner.
       Transform the user's request into a draft architecture plan.
       Do NOT implement code in this node.
 
       ## User Request
       $ARGUMENTS
 
+      ## Repository Search Policy
+      - Do NOT use `find` or Bash commands that invoke `find`. It is intentionally disabled for this workflow.
+      - Prefix Bash commands with `PATH="$ARTIFACTS_DIR/bin:$PATH"` so the guard shim blocks accidental `find` usage.
+      - Use `rg --files`, `git ls-files`, `grep`, `ls`, or Python `pathlib` for file discovery and traversal.
+      - Good examples: `rg --files backend/app`, `rg "class .*Service" backend/app`, `git ls-files '*.py'`.
+      - If a tool call fails because `find` is unavailable, retry immediately with one of the approved alternatives.
+
       ## Hard Rules
       - Plan only. Do not edit source files.
+      - Prefer targeted inspection of known directories (`backend/app/`, `frontend/src/`) over broad repo-wide scans.
       - Inspect the codebase deeply enough to avoid fantasy architecture.
       - Prefer a small number of strong top-level tasks over fragmented micro-tasks.
       - Preserve existing architecture and patterns.
@@ -105,11 +193,9 @@ nodes:
   - id: opus-plan-review
     depends_on: [architecture-plan]
     context: fresh
-    provider: claude
-    model: claude-opus-4-7
-    effort: high
-    thinking: enabled
-    idle_timeout: 7200000
+    provider: pi
+    model: lm-studio/qwen3.6-27b-mtp
+    idle_timeout: 1800000
     retry:
       max_attempts: 3
       delay_ms: 5000
@@ -117,7 +203,7 @@ nodes:
     prompt: |
       # Borg System Architekt — Fresh-Context Plan Review
 
-      You are Claude Opus 4.7 reviewing a draft pre-plan from a blank context.
+      You are Qwen 3.6 27B MTP reviewing a draft pre-plan from a blank context.
       Keep context lean: rely only on the user request and the planning artifacts.
       Do NOT perform broad repo exploration unless absolutely necessary.
       Do NOT implement code.
@@ -138,7 +224,8 @@ nodes:
       ## Review Goals
       - Identify weak assumptions, sequencing risks, or missing constraints.
       - Challenge over-scoping or under-scoping.
-      - Ask the user only the questions that materially affect implementation.
+      - Ask at most 3 user questions, ordered by dependency; each question must be answerable independently.
+      - Do not bundle multiple decisions into one question.
       - Recommend how Qwen should revise the plan before execution subtasks are generated.
 
       Write `$ARTIFACTS_DIR/plan-review.md` with:
@@ -150,31 +237,163 @@ nodes:
       - Review verdict: APPROVE_WITH_NOTES / NEEDS_REVISION
       - Input-budget notes if any artifacts had to be partially skipped
 
+      Also write `$ARTIFACTS_DIR/plan-review-questions.json` as strict valid JSON:
+      ```json
+      {
+        "verdict": "APPROVE_WITH_NOTES or NEEDS_REVISION",
+        "questions": [
+          {
+            "id": "Q1",
+            "question": "One concrete user-facing question ending with ?",
+            "why": "Why this answer is needed before finalizing the plan",
+            "blocks": ["Q2"]
+          }
+        ]
+      }
+      ```
+
+      JSON requirements:
+      - Use at most 3 questions.
+      - Preserve dependency order: Q1 must be answerable before Q2, Q2 before Q3.
+      - Do not bundle multiple decisions into one question.
+      - If no user question is needed, use an empty `questions` array.
+
       End with `<promise>PLAN_REVIEW_COMPLETE</promise>`.
 
-  - id: review-architecture-plan
+  - id: extract-plan-questions
     depends_on: [opus-plan-review]
+    script: |
+      import json, os, re
+      art = os.environ['ARTIFACTS_DIR']
+      json_path = os.path.join(art, 'plan-review-questions.json')
+      md_path = os.path.join(art, 'plan-review.md')
+      questions = []
+      verdict = 'APPROVE_WITH_NOTES'
+      if os.path.exists(json_path):
+          data = json.load(open(json_path, encoding='utf-8'))
+          verdict = str(data.get('verdict') or verdict)
+          for idx, item in enumerate(data.get('questions') or [], 1):
+              if not isinstance(item, dict):
+                  continue
+              question = str(item.get('question') or '').strip()
+              if not question:
+                  continue
+              questions.append({
+                  'id': str(item.get('id') or f'Q{idx}'),
+                  'question': question,
+                  'why': str(item.get('why') or '').strip(),
+                  'blocks': item.get('blocks') if isinstance(item.get('blocks'), list) else [],
+              })
+      else:
+          text = open(md_path, encoding='utf-8').read() if os.path.exists(md_path) else ''
+          m = re.search(r'(?ims)^#+\s*explicit questions for the user\s*\n(?P<body>.*?)(?=^#+\s|\Z)', text)
+          body = m.group('body') if m else ''
+          for idx, line in enumerate(body.splitlines(), 1):
+              line = re.sub(r'^[-*]\s+', '', line.strip())
+              line = re.sub(r'^\d+[.)]\s+', '', line)
+              if '?' in line:
+                  questions.append({'id': f'Q{len(questions)+1}', 'question': line, 'why': 'Extracted from markdown fallback.', 'blocks': []})
+      questions = questions[:3]
+      out = {'count': len(questions), 'verdict': verdict}
+      for i, item in enumerate(questions, 1):
+          out[f'q{i}'] = item['question']
+          out[f'q{i}Why'] = item.get('why', '')
+      with open(os.path.join(art, 'plan-questions-normalized.json'), 'w', encoding='utf-8') as f:
+          json.dump({'verdict': verdict, 'questions': questions}, f, ensure_ascii=False, indent=2)
+      print(json.dumps(out, ensure_ascii=False))
+    runtime: uv
+    timeout: 30000
+
+  - id: planq1
+    depends_on: [extract-plan-questions]
+    when: "$extract-plan-questions.output.count >= '1'"
+    trigger_rule: all_done
     approval:
       message: |
-        Review the draft plan and Opus review before execution subtasks are generated.
+        Plan review question 1/3:
 
-        Read these artifacts:
+        $extract-plan-questions.output.q1
+
+        Why this is needed:
+        $extract-plan-questions.output.q1Why
+      capture_response: true
+
+  - id: planq2
+    depends_on: [planq1, extract-plan-questions]
+    when: "$extract-plan-questions.output.count >= '2'"
+    trigger_rule: all_done
+    approval:
+      message: |
+        Plan review question 2/3:
+
+        $extract-plan-questions.output.q2
+
+        Why this is needed:
+        $extract-plan-questions.output.q2Why
+      capture_response: true
+
+  - id: planq3
+    depends_on: [planq2, extract-plan-questions]
+    when: "$extract-plan-questions.output.count >= '3'"
+    trigger_rule: all_done
+    approval:
+      message: |
+        Plan review question 3/3:
+
+        $extract-plan-questions.output.q3
+
+        Why this is needed:
+        $extract-plan-questions.output.q3Why
+      capture_response: true
+
+  - id: review-architecture-plan
+    depends_on: [planq1, planq2, planq3, extract-plan-questions]
+    trigger_rule: all_done
+    approval:
+      message: |
+        The ordered plan-review questions have now been asked one by one.
+
+        Please confirm whether Qwen should incorporate those answers and finalize the execution plan.
+
+        Artifacts for reference:
         - `$ARTIFACTS_DIR/architecture-plan.md`
         - `$ARTIFACTS_DIR/plan-outline.md`
         - `$ARTIFACTS_DIR/plan-review.md`
+        - `$ARTIFACTS_DIR/plan-questions-normalized.json`
 
-        Respond with any answers to the Opus questions plus plan feedback.
-        Approve when Qwen should finalize the plan and generate execution subtasks.
+        Add only final correction notes here, or approve to continue.
       capture_response: true
 
+  - id: collect-plan-feedback
+    depends_on: [review-architecture-plan, planq1, planq2, planq3]
+    trigger_rule: all_done
+    bash: |
+      set -euo pipefail
+      q1=$planq1.output
+      q2=$planq2.output
+      q3=$planq3.output
+      final=$review-architecture-plan.output
+      {
+        echo "# Interactive Plan Feedback"
+        echo
+        echo "## Answer 1"
+        printf '%s\n\n' "$q1"
+        echo "## Answer 2"
+        printf '%s\n\n' "$q2"
+        echo "## Answer 3"
+        printf '%s\n\n' "$q3"
+        echo "## Final plan feedback"
+        printf '%s\n' "$final"
+      } > "$ARTIFACTS_DIR/plan-user-feedback.md"
+      echo "Wrote $ARTIFACTS_DIR/plan-user-feedback.md"
+    timeout: 30000
+
   - id: finalize-plan
-    depends_on: [review-architecture-plan]
+    depends_on: [collect-plan-feedback]
     context: fresh
-    provider: claude
-    model: claude-opus-4-7
-    effort: high
-    thinking: enabled
-    idle_timeout: 7200000
+    provider: pi
+    model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
+    idle_timeout: 1800000
     retry:
       max_attempts: 4
       delay_ms: 5000
@@ -182,19 +401,25 @@ nodes:
     prompt: |
       # Borg System Architekt — Finalize Plan After Review
 
-      You are Claude Opus 4.7 finalizing the plan after Opus review and user feedback.
+      You are Qwen 3.6 35B finalizing the plan after Qwen 3.6 27B MTP review and sequential user feedback.
       Do NOT implement code in this node.
 
       ## Inputs
       - User request: `$ARGUMENTS`
       - Draft plan: `$ARTIFACTS_DIR/architecture-plan.md`
       - Draft outline: `$ARTIFACTS_DIR/plan-outline.md`
-      - Opus 4.7 review: `$ARTIFACTS_DIR/plan-review.md`
-      - User gate response: `$review-architecture-plan.output`
+      - Qwen 3.6 27B MTP review: `$ARTIFACTS_DIR/plan-review.md`
+      - Sequential user feedback: `$ARTIFACTS_DIR/plan-user-feedback.md`
+
+      ## Anti-Loop Rules
+      - Keep a visible `files_seen` list in your working notes.
+      - Do not read the same artifact or source file twice in this node.
+      - If a file was already read and you need a fact from it, use your previous note instead of reading again.
+      - Stop after one focused revision pass.
 
       ## Required Work
       - Revise `$ARTIFACTS_DIR/architecture-plan.md` in place.
-      - Resolve the important Opus 4.7 findings and user answers.
+      - Resolve the important Qwen 3.6 27B MTP findings and user answers.
       - Produce a crisp final top-level task breakdown suitable for execution planning.
       - Write `$ARTIFACTS_DIR/plan-finalization.md` summarizing:
         - what changed
@@ -207,11 +432,9 @@ nodes:
   - id: generate-subtasks
     depends_on: [finalize-plan]
     context: fresh
-    provider: claude
-    model: claude-opus-4-7
-    effort: high
-    thinking: enabled
-    idle_timeout: 7200000
+    provider: pi
+    model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
+    idle_timeout: 1800000
     retry:
       max_attempts: 4
       delay_ms: 5000
@@ -219,17 +442,23 @@ nodes:
     prompt: |
       # Borg System Architekt — Generate Sequential Execution Subtasks
 
-      You are Claude Opus 4.7 generating the final execution subtask plan.
+      You are Qwen 3.6 generating the final execution subtask plan.
       Do NOT implement code in this node.
 
       ## Inputs
       - User request: `$ARGUMENTS`
       - Final plan: `$ARTIFACTS_DIR/architecture-plan.md`
       - Plan finalization summary: `$ARTIFACTS_DIR/plan-finalization.md`
-      - Opus 4.7 review: `$ARTIFACTS_DIR/plan-review.md`
+      - Qwen 3.6 27B MTP review: `$ARTIFACTS_DIR/plan-review.md`
 
       ## Goal
       Convert the final plan into the executable sequential subtask list used by the worker loop.
+
+      ## Anti-Loop Rules
+      - Keep a `files_seen` list in your response.
+      - Read each artifact at most once.
+      - Do not explore the repository broadly; use the final plan's file references first.
+      - Stop after producing task-list.json and task handoffs.
 
       Write `$ARTIFACTS_DIR/task-list.json` as valid JSON:
       ```json
@@ -279,8 +508,95 @@ nodes:
 
       End with `<promise>SUBTASK_PLAN_COMPLETE</promise>`.
 
-  - id: verify-plan-artifacts
+  - id: opus-subtask-plan-review
     depends_on: [generate-subtasks]
+    context: fresh
+    provider: pi
+    model: lm-studio/qwen3.6-27b-mtp
+    idle_timeout: 1800000
+    retry:
+      max_attempts: 3
+      delay_ms: 5000
+      on_error: all
+    prompt: |
+      # Borg System Architekt — Subtask Plan Review
+
+      You are Qwen 3.6 27B MTP reviewing only the generated execution plan.
+      Do NOT inspect source broadly and do NOT implement code.
+
+      ## Inputs
+      - User request: `$ARGUMENTS`
+      - Final architecture plan: `$ARTIFACTS_DIR/architecture-plan.md`
+      - Subtask list: `$ARTIFACTS_DIR/task-list.json`
+      - Task handoffs: `$ARTIFACTS_DIR/tasks/*.md`
+
+      ## Review Rules
+      - Verify sequencing, dependencies, handoff completeness, validation commands, and scope boundaries.
+      - Ask at most one user question. Prefer an explicit recommendation over another question.
+      - Do not bundle multiple decisions into a question.
+      - Keep the review focused on the plan, not implementation code.
+
+      Write `$ARTIFACTS_DIR/subtask-plan-review.md` with:
+      - Verdict: APPROVE_WITH_NOTES / NEEDS_REVISION
+      - Blocking plan issues
+      - Non-blocking suggestions
+      - At most one user question, if truly necessary
+      - Required revisions for Qwen before execution
+
+      End with `<promise>SUBTASK_PLAN_REVIEW_COMPLETE</promise>`.
+
+  - id: review-subtask-plan
+    depends_on: [opus-subtask-plan-review]
+    approval:
+      message: |
+        Review the generated execution subtasks and Qwen 3.6 27B MTP subtask-plan review.
+
+        Artifacts:
+        - `$ARTIFACTS_DIR/task-list.json`
+        - `$ARTIFACTS_DIR/tasks/`
+        - `$ARTIFACTS_DIR/subtask-plan-review.md`
+
+        Add feedback now, or approve to let Qwen revise/confirm the subtask plan before execution.
+      capture_response: true
+
+  - id: revise-subtasks-after-review
+    depends_on: [review-subtask-plan]
+    context: fresh
+    provider: pi
+    model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
+    idle_timeout: 1800000
+    retry:
+      max_attempts: 4
+      delay_ms: 5000
+      on_error: all
+    prompt: |
+      # Borg System Architekt — Revise Subtasks After Review
+
+      You are Qwen 3.6 35B revising or confirming the sequential execution plan.
+      Do NOT implement source code in this node.
+
+      ## Inputs
+      - Final architecture plan: `$ARTIFACTS_DIR/architecture-plan.md`
+      - Current subtask list: `$ARTIFACTS_DIR/task-list.json`
+      - Task handoffs: `$ARTIFACTS_DIR/tasks/*.md`
+      - Qwen 3.6 27B MTP subtask-plan review: `$ARTIFACTS_DIR/subtask-plan-review.md`
+      - User feedback: `$review-subtask-plan.output`
+
+      ## Required Work
+      - Apply blocking review feedback to `$ARTIFACTS_DIR/task-list.json` and task handoffs.
+      - Preserve contiguous task ids and sequential dependencies.
+      - If no changes are needed, write that explicitly.
+      - Write `$ARTIFACTS_DIR/subtask-plan-finalization.md` with accepted/rejected review items.
+
+      ## Anti-Loop Rules
+      - Read each listed artifact at most once.
+      - Do not inspect implementation source files.
+      - Stop after one revision pass.
+
+      End with `<promise>SUBTASK_PLAN_FINALIZED</promise>`.
+
+  - id: verify-plan-artifacts
+    depends_on: [revise-subtasks-after-review]
     bash: |
       set -euo pipefail
       test -s "$ARTIFACTS_DIR/architecture-plan.md"
@@ -319,8 +635,8 @@ nodes:
   - id: process-tasks
     depends_on: [verify-plan-artifacts]
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
-    idle_timeout: 7200000
+    model: lm-studio/qwen3.6-27b-mtp
+    idle_timeout: 1800000
     loop:
       max_iterations: 40
       fresh_context: true
@@ -350,7 +666,7 @@ nodes:
       prompt: |
         # Borg System Architekt — Sequential Dynamic Task Worker
 
-        You are Qwen 3.6 27B executing exactly one planned task in this iteration.
+        You are Qwen 3.6 27B MTP executing exactly one planned task in this iteration.
         This is a hard context cut. You have no memory except what you read from disk.
 
         ## Core Inputs
@@ -361,37 +677,52 @@ nodes:
         - Previous iteration output: `$LOOP_PREV_OUTPUT`
 
         ## Mission
-        Process exactly one eligible task from `task-list.json` per iteration.
-        Eligible means:
-        - `status` is `pending`
-        - all `dependsOn` tasks are already terminal (`done` or `blocked`)
+        Process exactly one deterministically selected task per iteration.
 
-        If there is no eligible task and no task remains open, output:
-        `<promise>ALL_TASKS_COMPLETE</promise>`
+        First action in every iteration:
+        ```bash
+        PATH="$ARTIFACTS_DIR/bin:$PATH" python3 "$ARTIFACTS_DIR/bin/select_next_task.py"
+        ```
+
+        Then read `$ARTIFACTS_DIR/current-task.json`.
+        - If `selected` is null and no tasks remain open, output `<promise>ALL_TASKS_COMPLETE</promise>`.
+        - If `selected` is null but tasks remain blocked or waiting, write a blocker note and output `<promise>ALL_TASKS_COMPLETE</promise>`.
+        - If a task is selected, implement only that task id and no other task.
+
+        ## Repository Search Policy
+        - Do NOT use `find` or Bash commands that invoke `find`. It is intentionally disabled for this workflow.
+        - Prefix Bash commands with `PATH="$ARTIFACTS_DIR/bin:$PATH"` so the guard shim blocks accidental `find` usage.
+        - Use `rg --files`, `git ls-files`, `grep`, `ls`, or Python `pathlib` for file discovery and traversal.
+        - Good examples: `rg --files backend/app`, `rg "TODO|FIXME" backend frontend`, `git ls-files '*.ts'`.
+        - If a tool call fails because `find` is unavailable, retry immediately with one of the approved alternatives.
 
         ## Required Procedure
-        1. Read the architecture plan and full task list.
-        2. Select the next eligible task in order.
-        3. Mark that task `in_progress` in `task-list.json`.
-        4. Read `$ARTIFACTS_DIR/tasks/<TASK_ID>.md` and the listed source files.
-        5. Implement only that task.
-        6. Run the task's validation commands where possible.
-        7. Perform a focused self-review of only that task against:
+        1. Run the deterministic selector command above.
+        2. Read the architecture plan, `$ARTIFACTS_DIR/current-task.json`, and the selected task handoff.
+        3. Read only the source files listed by the selected task unless a nearby file is required to preserve an existing pattern.
+        4. Implement only that selected task.
+        5. Run the task's validation commands where possible.
+        6. Perform a focused self-review of only that task against:
            - scope discipline
            - correctness
            - contract compatibility
            - error handling
            - simplicity
            - validation evidence
-        8. Fix your own concrete findings immediately if they are safe and in scope.
-        9. Write these artifacts for the task:
+        7. Fix your own concrete findings immediately if they are safe and in scope.
+        8. Write these artifacts for the task:
            - `$ARTIFACTS_DIR/tasks/<TASK_ID>-implementation.md`
            - `$ARTIFACTS_DIR/reviews/<TASK_ID>-review.md`
            - `$ARTIFACTS_DIR/fixes/<TASK_ID>-fixes.md` or `<TASK_ID>-no-fixes-needed.md`
-        10. Update `task-list.json`:
-            - `done` if task is complete and validated enough
-            - `blocked` only if a real blocker remains after investigation
-        11. If blocked, record the blocker clearly in the task artifacts and status.
+        9. Update only the selected task in `task-list.json`:
+           - `done` if task is complete and validated enough
+           - `blocked` only if a real blocker remains after investigation
+        10. If blocked, record the blocker clearly in the task artifacts and status.
+        11. Before emitting `TASK_PROCESSED`, run:
+            ```bash
+            python3 "$ARTIFACTS_DIR/bin/guard_current_task.py"
+            ```
+            If the guard fails, repair the task-list drift and rerun the guard.
 
         ## Hard Rules
         - Never start a second task in the same iteration.
@@ -411,44 +742,102 @@ nodes:
     bash: |
       set +e
       mkdir -p "$ARTIFACTS_DIR/final"
-      {
-        echo "# Validation Results"
-        echo
-        echo "## Git Status"
-        git status --short
-        echo
-        echo "## Git Diff Stat"
-        git diff --stat
-        echo
-        echo "## Backend"
-        if [ -d backend ]; then
-          (cd backend && uv run python -m pytest -v)
-          echo "backend_pytest_exit=$?"
-        else
-          echo "No backend directory"
-        fi
-        echo
-        echo "## Frontend"
-        if [ -d frontend ]; then
-          (cd frontend && npm run test)
-          echo "frontend_test_exit=$?"
-          (cd frontend && npm run type-check)
-          echo "frontend_typecheck_exit=$?"
-          (cd frontend && npm run lint)
-          echo "frontend_lint_exit=$?"
-        else
-          echo "No frontend directory"
-        fi
-      } 2>&1 | tee "$ARTIFACTS_DIR/final/validation.md"
+      report="$ARTIFACTS_DIR/final/validation.md"
+      json_report="$ARTIFACTS_DIR/final/validation.json"
+      : > "$report"
+      log() { printf '%s\n' "$*" >> "$report"; }
+
+      log "# Validation Results"
+      log ""
+      log "## Git Status"
+      git status --short >> "$report" 2>&1
+      diff_count=$(git status --short | wc -l | tr -d ' ')
+      log ""
+      log "## Git Diff Stat"
+      git diff --stat >> "$report" 2>&1
+
+      backend_exit=0
+      frontend_check_exit=0
+      frontend_build_exit=0
+      blocked_tasks=0
+      open_tasks=0
+
+      log ""
+      log "## Task State"
+      python3 - "$ARTIFACTS_DIR/task-list.json" >> "$report" 2>&1 << 'PY'
+      import json, sys
+      data = json.load(open(sys.argv[1], encoding='utf-8'))
+      tasks = data.get('tasks') or []
+      open_statuses = {'pending', 'in_progress', 'reviewing', 'fixing'}
+      blocked = [t.get('id') for t in tasks if t.get('status') == 'blocked']
+      open_tasks = [t.get('id') for t in tasks if t.get('status') in open_statuses]
+      print(f"tasks={len(tasks)} open={open_tasks} blocked={blocked}")
+      PY
+      task_counts=$(python3 - "$ARTIFACTS_DIR/task-list.json" << 'PY'
+      import json, sys
+      data = json.load(open(sys.argv[1], encoding='utf-8'))
+      tasks = data.get('tasks') or []
+      open_statuses = {'pending', 'in_progress', 'reviewing', 'fixing'}
+      print(sum(1 for t in tasks if t.get('status') in open_statuses), sum(1 for t in tasks if t.get('status') == 'blocked'))
+      PY
+      )
+      open_tasks=$(printf '%s' "$task_counts" | awk '{print $1}')
+      blocked_tasks=$(printf '%s' "$task_counts" | awk '{print $2}')
+
+      log ""
+      log "## Backend"
+      if [ -d backend ]; then
+        (cd backend && uv sync --extra dev && uv run python -m pytest -v) >> "$report" 2>&1
+        backend_exit=$?
+        log "backend_pytest_exit=$backend_exit"
+      else
+        log "No backend directory"
+      fi
+
+      log ""
+      log "## Frontend"
+      if [ -d frontend ]; then
+        (cd frontend && npm run check) >> "$report" 2>&1
+        frontend_check_exit=$?
+        log "frontend_check_exit=$frontend_check_exit"
+        (cd frontend && npm run build) >> "$report" 2>&1
+        frontend_build_exit=$?
+        log "frontend_build_exit=$frontend_build_exit"
+      else
+        log "No frontend directory"
+      fi
+
+      ready=false
+      if [ "$diff_count" -gt 0 ] && [ "$open_tasks" -eq 0 ] && [ "$blocked_tasks" -eq 0 ] && [ "$backend_exit" -eq 0 ] && [ "$frontend_check_exit" -eq 0 ] && [ "$frontend_build_exit" -eq 0 ]; then
+        ready=true
+      fi
+
+      python3 - << PY
+      import json
+      result = {
+        'diffExists': $([ "$diff_count" -gt 0 ] && echo True || echo False),
+        'diffFileCount': int('$diff_count'),
+        'openTasks': int('$open_tasks'),
+        'blockedTasks': int('$blocked_tasks'),
+        'backendPytestExit': int('$backend_exit'),
+        'frontendCheckExit': int('$frontend_check_exit'),
+        'frontendBuildExit': int('$frontend_build_exit'),
+        'readyForReview': '$ready' == 'true',
+      }
+      open('$json_report', 'w', encoding='utf-8').write(json.dumps(result, indent=2))
+      print(json.dumps(result))
+      PY
       exit 0
     timeout: 1800000
 
   - id: final-system-review
     depends_on: [validate]
+    when: "$validate.output.readyForReview == 'true'"
     context: fresh
     provider: pi
-    model: lm-studio/qwen/qwen3.6-27b-mtp@q6_k_xl
-    idle_timeout: 7200000
+    model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
+    denied_tools: [find]
+    idle_timeout: 1800000
     retry:
       max_attempts: 4
       delay_ms: 5000
@@ -456,8 +845,14 @@ nodes:
     prompt: |
       # Borg System Architekt — Final Whole-System Review
 
-      You are Claude Opus 4.7 as the final reviewer. Start from a blank context and judge the entire implementation.
+      You are Qwen 3.6 35B as the final implementation reviewer. Start from a blank context and judge the entire implementation.
       Be strict, evidence-based, and specific. Do not rubber-stamp.
+
+      ## Repository Search Policy
+      - Do NOT use `find` or Bash commands that invoke `find`. It is intentionally disabled for this workflow.
+      - Prefix Bash commands with `PATH="$ARTIFACTS_DIR/bin:$PATH"` so the guard shim blocks accidental `find` usage.
+      - Use `rg --files`, `git ls-files`, `grep`, `ls`, or Python `pathlib` for file discovery and traversal.
+      - If a tool call fails because `find` is unavailable, retry immediately with one of the approved alternatives.
 
       ## Read These Artifacts
       - `$ARTIFACTS_DIR/architecture-plan.md`
@@ -466,6 +861,9 @@ nodes:
       - `$ARTIFACTS_DIR/reviews/*-review.md`
       - `$ARTIFACTS_DIR/fixes/*.md` if present
       - `$ARTIFACTS_DIR/final/validation.md`
+      - `$ARTIFACTS_DIR/final/validation.json`
+
+      Do not proceed if validation.json is not ready for review; write FAIL and explain the gating issue.
 
       ## Inspect the Actual Diff
       Run and inspect:
@@ -497,13 +895,32 @@ nodes:
       Update `$ARTIFACTS_DIR/state.json` and set `finalReview` to `pass` or `fail`.
       End with `<promise>FINAL_REVIEW_COMPLETE</promise>`.
 
+  - id: check-final-review
+    depends_on: [final-system-review, validate]
+    trigger_rule: all_done
+    bash: |
+      set -euo pipefail
+      state="$ARTIFACTS_DIR/state.json"
+      validation="$ARTIFACTS_DIR/final/validation.json"
+      python3 - "$state" "$validation" << 'PY'
+      import json, os, sys
+      state_path, validation_path = sys.argv[1:3]
+      state = json.load(open(state_path, encoding='utf-8')) if os.path.exists(state_path) else {}
+      validation = json.load(open(validation_path, encoding='utf-8')) if os.path.exists(validation_path) else {}
+      proceed = validation.get('readyForReview') is True and str(state.get('finalReview')).lower() == 'pass'
+      print(json.dumps({'proceedToPr': proceed, 'finalReview': state.get('finalReview'), 'readyForReview': validation.get('readyForReview')}))
+      PY
+    timeout: 30000
+
   - id: finalize-pr
     command: archon-finalize-pr
-    depends_on: [final-system-review]
+    depends_on: [check-final-review]
+    when: "$check-final-review.output.proceedToPr == 'true'"
     context: fresh
     provider: pi
-    model: lm-studio/qwen2.5-7b-instruct
-    idle_timeout: 7200000
+    model: lm-studio/qwen3.6-27b-mtp
+    denied_tools: [find]
+    idle_timeout: 1800000
     retry:
       max_attempts: 4
       delay_ms: 5000
@@ -511,11 +928,13 @@ nodes:
 
   - id: workflow-summary
     command: archon-workflow-summary
-    depends_on: [finalize-pr]
+    depends_on: [finalize-pr, check-final-review]
+    trigger_rule: all_done
     context: fresh
     provider: pi
-    model: lm-studio/qwen2.5-7b-instruct
-    idle_timeout: 7200000
+    model: lm-studio/qwen3.6-27b-mtp
+    denied_tools: [find]
+    idle_timeout: 1800000
     retry:
       max_attempts: 4
       delay_ms: 5000
