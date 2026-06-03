@@ -84,30 +84,57 @@ class DiscordBotService:
 
     async def search(self, query: str) -> Response:
         """
-        Durchsuche Notes und Vault nach query.
+        Durchsuche Notes (DB) und Vault (Dateisystem) nach query.
 
         Returns:
-            Response mit Suchergebnissen
+            Response mit kombinierten Suchergebnissen
         """
         try:
-            async with AsyncSessionLocal() as db:
-                # Suche in DB Notes (LIKE-Search auf title und content)
-                notes_result = await db.execute(
-                    select(Note).where(
-                        Note.is_archived == False,
-                        (Note.title.ilike(f"%{query}%")) | (Note.content.ilike(f"%{query}%")),
-                    ).limit(10)
-                )
-                notes = notes_result.scalars().all()
+            results_parts: list[str] = []
 
-                if not notes:
-                    return Response(content=f"Keine Notes gefunden für: {query}")
+            # --- 1. DB Notes Suche ---
+            try:
+                async with AsyncSessionLocal() as db:
+                    notes_result = await db.execute(
+                        select(Note).where(
+                            Note.is_archived == False,
+                            (
+                                Note.title.ilike(f"%{query}%")
+                                | Note.content.ilike(f"%{query}%")
+                            ),
+                        ).limit(10)
+                    )
+                    notes = notes_result.scalars().all()
 
-                lines = [f"Notes ({len(notes)}):"]
-                for note in notes[:5]:
-                    lines.append(f"  • {note.title} (ID: {note.id})")
+                    if notes:
+                        lines = [f"📝 Notes ({len(notes)}):"]
+                        for note in notes[:5]:
+                            # Extrahiere Snippet aus dem Content
+                            snippet = self._extract_snippet(note.content, query)
+                            lines.append(f"  • {note.title} (ID: {note.id})")
+                            if snippet:
+                                lines.append(f"    …{snippet}…")
+                        results_parts.append("\n".join(lines))
+            except Exception as db_err:
+                logger.warning(f"DB search failed: {db_err}")
 
-                return Response(content="\n".join(lines))
+            # --- 2. Vault Suche ---
+            try:
+                vault_results = self._search_vault(query)
+                if vault_results:
+                    lines = [f"📂 Vault ({len(vault_results)}):"]
+                    for vr in vault_results[:5]:
+                        lines.append(f"  • {vr['path']}")
+                        if vr.get("snippet"):
+                            lines.append(f"    …{vr['snippet']}…")
+                    results_parts.append("\n".join(lines))
+            except Exception as vault_err:
+                logger.warning(f"Vault search failed: {vault_err}")
+
+            if not results_parts:
+                return Response(content=f"Keine Ergebnisse für: {query}")
+
+            return Response(content="\n\n".join(results_parts))
 
         except Exception as e:
             logger.error(f"Search error: {e}")
@@ -115,6 +142,90 @@ class DiscordBotService:
                 content=f"Fehler: Suche fehlgeschlagen — {str(e)}",
                 is_error=True,
             )
+
+    def _extract_snippet(self, content: str, query: str, max_len: int = 120) -> str:
+        """
+        Extrahiere ein Snippet aus dem Content um den Query-Treffer herum.
+
+        Args:
+            content: Der vollständige Content einer Note
+            query: Der Suchbegriff
+            max_len: Maximale Snippet-Länge
+
+        Returns:
+            Snippet-String oder leer wenn kein Treffer
+        """
+        if not content or not query:
+            return ""
+
+        query_lower = query.lower()
+        content_lower = content.lower()
+        idx = content_lower.find(query_lower)
+
+        if idx == -1:
+            # Fallback: erster Absatz
+            first_line = content.split("\n")[0].strip()
+            return first_line[:max_len] if first_line else ""
+
+        # Extrahiere Text um den Treffer herum
+        start = max(0, idx - 40)
+        end = min(len(content), idx + len(query) + 40)
+        snippet = content[start:end].strip()
+
+        # Kürze bei Bedarf
+        if len(snippet) > max_len:
+            snippet = snippet[:max_len] + "…"
+
+        return snippet
+
+    def _search_vault(self, query: str, vault_path: Optional[str] = None) -> list[dict]:
+        """
+        Durchsuche das Obsidian-Vault (Dateisystem) nach query.
+
+        Args:
+            query: Der Suchbegriff
+            vault_path: Optionaler Vault-Pfad, sonst ~/.
+
+        Returns:
+            Liste von dicts mit 'path' und 'snippet'
+        """
+        import os
+        from pathlib import Path
+
+        if vault_path is None:
+            vault_path = os.path.expanduser("~/Memory")
+
+        vault = Path(vault_path)
+        if not vault.exists() or not vault.is_dir():
+            return []
+
+        query_lower = query.lower()
+        results: list[dict] = []
+
+        for md_file in vault.rglob("*.md"):
+            # Skip excluded directories
+            parts = list(md_file.parts)
+            excluded = {".git", "__pycache__", "node_modules", ".venv", ".obsidian", ".trash", "expired"}
+            if any(part in excluded for part in parts):
+                continue
+
+            try:
+                text = md_file.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+
+            if query_lower not in text.lower():
+                continue
+
+            rel_path = str(md_file.relative_to(vault))
+            snippet = self._extract_snippet(text, query, max_len=100)
+
+            results.append({
+                "path": rel_path,
+                "snippet": snippet,
+            })
+
+        return results
 
     async def status(self) -> Response:
         """

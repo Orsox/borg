@@ -95,7 +95,7 @@ class LlmClient:
         except httpx.HTTPStatusError as e:
             logger.error(f"LM Studio HTTP error: {e.response.status_code} {e.response.text}")
             raise LlmError(f"LM Studio HTTP error: {e.response.status_code}")
-        except httpx.TimeoutError as e:
+        except (httpx.ReadTimeout, httpx.ConnectTimeout) as e:
             logger.error(f"LM Studio timeout: {e}")
             raise LlmError("LM Studio timeout after 30s")
         except Exception as e:

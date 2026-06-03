@@ -618,6 +618,552 @@ class TestBotClientPrefixResolver:
             assert result is None
 
 
+class TestServiceSearch:
+    """Tests für DiscordBotService.search() (Slice 4)."""
+
+    @pytest.mark.asyncio
+    async def test_search_finds_notes_in_db(self):
+        """Test: search() findet Notes in der DB."""
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+        from app.database import AsyncSessionLocal
+        from app.second_brain.models import Note
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+
+        # Erstelle Test-Notes in der DB
+        async with AsyncSessionLocal() as db:
+            note1 = Note(title="Archon Workflow Design", content="Details zum Archon Workflow Design und der Integration.", is_archived=False)
+            note2 = Note(title="Discord Bot Locutus", content="Locutus ist ein Discord-Bot für BorgOS.", is_archived=False)
+            db.add_all([note1, note2])
+            await db.commit()
+
+        response = await service.search("Archon")
+
+        assert not response.is_error
+        assert "📝 Notes" in response.content
+        assert "Archon Workflow Design" in response.content
+
+    @pytest.mark.asyncio
+    async def test_search_returns_snippet(self):
+        """Test: search() gibt Snippet aus Content zurück."""
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+        from app.database import AsyncSessionLocal
+        from app.second_brain.models import Note
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+
+        async with AsyncSessionLocal() as db:
+            note = Note(
+                title="LM Studio Integration",
+                content="LM Studio läuft auf localhost:1234 und bietet eine OpenAI-kompatible API für lokale Modelle.",
+                is_archived=False,
+            )
+            db.add(note)
+            await db.commit()
+
+        response = await service.search("LM Studio")
+
+        assert not response.is_error
+        assert "LM Studio Integration" in response.content
+        assert "localhost:1234" in response.content  # Snippet sollte den Treffer-Kontext zeigen
+
+    @pytest.mark.asyncio
+    async def test_search_no_results(self):
+        """Test: search() mit keinem Treffer gibt 'Keine Ergebnisse'."""
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+
+        response = await service.search("xyznonexistent12345")
+
+        assert not response.is_error
+        assert "Keine Ergebnisse" in response.content
+
+    @pytest.mark.asyncio
+    async def test_search_case_insensitive(self):
+        """Test: search() ist case-insensitive."""
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+        from app.database import AsyncSessionLocal
+        from app.second_brain.models import Note
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+
+        async with AsyncSessionLocal() as db:
+            note = Note(title="Test Note", content="Content mit dem Suchbegriff.", is_archived=False)
+            db.add(note)
+            await db.commit()
+
+        response_upper = await service.search("SUCHBEGRiff")
+        response_lower = await service.search("suchbegriff")
+
+        assert not response_upper.is_error
+        assert not response_lower.is_error
+        assert "Test Note" in response_upper.content
+        assert "Test Note" in response_lower.content
+
+    @pytest.mark.asyncio
+    async def test_search_excludes_archived(self):
+        """Test: search() ignoriert archivierte Notes."""
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+        from app.database import AsyncSessionLocal
+        from app.second_brain.models import Note
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+
+        async with AsyncSessionLocal() as db:
+            active = Note(title="Active Note", content="Diese Note ist aktiv.", is_archived=False)
+            archived = Note(title="Archived Note", content="Diese Note ist archiviert.", is_archived=True)
+            db.add_all([active, archived])
+            await db.commit()
+
+        response = await service.search("Note")
+
+        assert not response.is_error
+        assert "Active Note" in response.content
+        assert "Archived Note" not in response.content
+
+    @pytest.mark.asyncio
+    async def test_search_vault_not_found(self):
+        """Test: _search_vault() gibt [] zurück wenn Vault nicht existiert."""
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+
+        # Vault-Pfad der nicht existiert
+        results = service._search_vault("test", vault_path="/tmp/borgos_nonexistent_vault_xyz")
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_search_vault_finds_md_files(self, tmp_path):
+        """Test: _search_vault() findet md-Dateien im Vault."""
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+
+        # Erstelle ein temporäres Vault
+        vault_dir = tmp_path / "vault"
+        vault_dir.mkdir()
+        md_file = vault_dir / "test.md"
+        md_file.write_text("# Test\n\nDies ist ein Vault-Eintrag mit dem Wort Locutus.", encoding="utf-8")
+
+        results = service._search_vault("Locutus", vault_path=str(vault_dir))
+
+        assert len(results) == 1
+        assert results[0]["path"] == "test.md"
+        assert "Locutus" in results[0]["snippet"]
+
+    @pytest.mark.asyncio
+    async def test_search_vault_skips_excluded_dirs(self, tmp_path):
+        """Test: _search_vault() überspringt excluded directories."""
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+
+        vault_dir = tmp_path / "vault"
+        vault_dir.mkdir()
+        excluded_dir = vault_dir / ".obsidian"
+        excluded_dir.mkdir()
+        md_file = excluded_dir / "ignored.md"
+        md_file.write_text("Dies enthält Locutus und sollte ignoriert werden.", encoding="utf-8")
+
+        valid_file = vault_dir / "valid.md"
+        valid_file.write_text("Dies enthält auch Locutus.", encoding="utf-8")
+
+        results = service._search_vault("Locutus", vault_path=str(vault_dir))
+
+        # Sollte nur die gültige Datei finden, nicht die aus .obsidian/
+        assert len(results) == 1
+        assert results[0]["path"] == "valid.md"
+
+    @pytest.mark.asyncio
+    async def test_search_combined_db_and_vault(self):
+        """Test: search() kombiniert DB Notes und Vault Ergebnisse."""
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+        from app.database import AsyncSessionLocal
+        from app.second_brain.models import Note
+        import tempfile
+        import os
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+
+        # Erstelle Note in DB
+        async with AsyncSessionLocal() as db:
+            note = Note(title="Archon Config", content="Archon ist ein AI Framework.", is_archived=False)
+            db.add(note)
+            await db.commit()
+
+        # Erstelle temporäres Vault
+        with tempfile.TemporaryDirectory() as tmpdir:
+            vault_dir = tmp_path = tmpdir
+            md_file = os.path.join(vault_dir, "archon_notes.md")
+            with open(md_file, "w", encoding="utf-8") as f:
+                f.write("# Archon\n\nArchon workflows werden hier verwaltet.")
+
+            # Override vault_path für diesen Test
+            response = await service.search("Archon")
+
+            assert not response.is_error
+            assert "📝 Notes" in response.content
+
+    def test_extract_snippet_finds_query(self):
+        """Test: _extract_snippet() findet Query-Treffer im Content."""
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+
+        content = "LM Studio läuft auf localhost:1234 und bietet eine OpenAI-kompatible API für lokale Modelle."
+        snippet = service._extract_snippet(content, "LM Studio")
+
+        assert "LM Studio" in snippet
+        assert len(snippet) <= 120
+
+    def test_extract_snippet_no_query_match(self):
+        """Test: _extract_snippet() gibt ersten Absatz wenn kein Treffer."""
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+
+        content = "Erster Absatz.\nZweiter Absatz mit dem Suchbegriff."
+        snippet = service._extract_snippet(content, "nicht gefunden")
+
+        assert "Erster Absatz" in snippet
+
+    def test_extract_snippet_empty_content(self):
+        """Test: _extract_snippet() mit leerem Content gibt '' zurück."""
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+
+        snippet = service._extract_snippet("", "test")
+        assert snippet == ""
+
+    def test_extract_snippet_truncates_long(self):
+        """Test: _extract_snippet() kürzt lange Snippets."""
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+
+        # Der Snippet ist content[idx-40:idx+len(query)+40], max ~80+query_len chars.
+        # Für "TREFFER" (7 chars) ist der Snippet max 87 chars — unter 120.
+        # Test mit kleinerem max_len um Truncation zu erzwingen.
+        content = "X" * 100 + "TREFFER" + "Y" * 100
+        snippet = service._extract_snippet(content, "TREFFER", max_len=50)
+
+        assert len(snippet) <= 51  # max_len + ellipsis
+        assert snippet.endswith("…")
+
+
+class TestLlmClient:
+    """Tests für LlmClient (Slice 5)."""
+
+    def _make_mock_httpx(self, json_response, raise_error=None):
+        """Hilfsfunktion zum Erzeugen eines gemoddeten httpx.AsyncClient."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = json_response
+        if raise_error:
+            mock_response.raise_for_status = MagicMock(side_effect=raise_error)
+        else:
+            mock_response.raise_for_status = MagicMock()
+
+        mock_httpx = AsyncMock()
+        mock_httpx.post.return_value = mock_response
+        return mock_httpx
+
+    @pytest.mark.asyncio
+    async def test_llm_client_sends_request(self):
+        """Test: LlmClient sendet korrekte Anfrage an LM Studio."""
+        from unittest.mock import patch
+
+        from app.discord_bot.config import LlmConfig
+        from app.discord_bot.llm import LlmClient
+
+        config = LlmConfig(base_url="http://localhost:1234/v1", model_id="test-model")
+        client = LlmClient(config)
+
+        mock_httpx = self._make_mock_httpx({
+            "choices": [{"message": {"content": "Test-Antwort"}}]
+        })
+
+        with patch("httpx.AsyncClient") as MockHttpClient:
+            MockHttpClient.return_value = mock_httpx
+            await client.start()
+            client._client = mock_httpx
+
+            answer = await client.chat(
+                [{"role": "user", "content": "Hallo"}],
+                "Du bist ein Bot.",
+            )
+
+            assert answer == "Test-Antwort"
+            mock_httpx.post.assert_called_once()
+            call_args = mock_httpx.post.call_args
+            assert call_args.kwargs["json"]["model"] == "test-model"
+            assert len(call_args.kwargs["json"]["messages"]) == 2
+
+            await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_llm_client_raises_on_empty_choices(self):
+        """Test: LlmClient wirft LlmError bei leeren choices."""
+        from unittest.mock import patch
+
+        from app.discord_bot.config import LlmConfig
+        from app.discord_bot.llm import LlmClient, LlmError
+
+        config = LlmConfig()
+        client = LlmClient(config)
+
+        mock_httpx = self._make_mock_httpx({"choices": []})
+
+        with patch("httpx.AsyncClient") as MockHttpClient:
+            MockHttpClient.return_value = mock_httpx
+            await client.start()
+            client._client = mock_httpx
+
+            with pytest.raises(LlmError):
+                await client.chat(
+                    [{"role": "user", "content": "Hallo"}],
+                    "System.",
+                )
+
+            await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_llm_client_raises_on_empty_content(self):
+        """Test: LlmClient wirft LlmError bei leerem Content."""
+        from unittest.mock import patch
+
+        from app.discord_bot.config import LlmConfig
+        from app.discord_bot.llm import LlmClient, LlmError
+
+        config = LlmConfig()
+        client = LlmClient(config)
+
+        mock_httpx = self._make_mock_httpx({
+            "choices": [{"message": {"content": ""}}]
+        })
+
+        with patch("httpx.AsyncClient") as MockHttpClient:
+            MockHttpClient.return_value = mock_httpx
+            await client.start()
+            client._client = mock_httpx
+
+            with pytest.raises(LlmError):
+                await client.chat(
+                    [{"role": "user", "content": "Hallo"}],
+                    "System.",
+                )
+
+            await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_llm_client_raises_on_http_error(self):
+        """Test: LlmClient wirft LlmError bei HTTP-Fehler."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        import httpx
+
+        from app.discord_bot.config import LlmConfig
+        from app.discord_bot.llm import LlmClient, LlmError
+
+        config = LlmConfig()
+        client = LlmClient(config)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.text = "Internal Server Error"
+
+        http_error = httpx.HTTPStatusError(
+            "Server error",
+            request=MagicMock(),
+            response=mock_response,
+        )
+
+        mock_httpx = AsyncMock()
+        mock_httpx.post.side_effect = http_error
+
+        with patch("httpx.AsyncClient") as MockHttpClient:
+            MockHttpClient.return_value = mock_httpx
+            await client.start()
+            client._client = mock_httpx
+
+            with pytest.raises(LlmError):
+                await client.chat(
+                    [{"role": "user", "content": "Hallo"}],
+                    "System.",
+                )
+
+            await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_llm_client_raises_when_not_started(self):
+        """Test: LlmClient wirft LlmError wenn nicht gestartet."""
+        from app.discord_bot.config import LlmConfig
+        from app.discord_bot.llm import LlmClient, LlmError
+
+        config = LlmConfig()
+        client = LlmClient(config)
+
+        # Nicht starten — _client ist None
+        with pytest.raises(LlmError, match="not started"):
+            await client.chat(
+                [{"role": "user", "content": "Hallo"}],
+                "System.",
+            )
+
+    @pytest.mark.asyncio
+    async def test_llm_client_strips_answer(self):
+        """Test: LlmClient trimmt Antwort-Text."""
+        from unittest.mock import patch
+
+        from app.discord_bot.config import LlmConfig
+        from app.discord_bot.llm import LlmClient
+
+        config = LlmConfig()
+        client = LlmClient(config)
+
+        mock_httpx = self._make_mock_httpx({
+            "choices": [{"message": {"content": "  Antwort mit Whitespace  "}}]
+        })
+
+        with patch("httpx.AsyncClient") as MockHttpClient:
+            MockHttpClient.return_value = mock_httpx
+            await client.start()
+            client._client = mock_httpx
+
+            answer = await client.chat(
+                [{"role": "user", "content": "Hallo"}],
+                "System.",
+            )
+
+            assert answer == "Antwort mit Whitespace"
+            await client.stop()
+
+
+class TestServiceChat:
+    """Tests für DiscordBotService.chat() (Slice 5)."""
+
+    @pytest.mark.asyncio
+    async def test_chat_sends_to_llm(self):
+        """Test: chat() sendet Nachricht an LLM und gibt Antwort zurück."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+
+        # Mock LlmClient
+        mock_llm = AsyncMock()
+        mock_llm.chat = AsyncMock(return_value="Locutus antwortet hier.")
+        service._llm_client = mock_llm
+
+        response = await service.chat("Wie geht es dir?", user_id=123)
+
+        assert not response.is_error
+        assert "Locutus antwortet hier" in response.content
+        mock_llm.chat.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_chat_returns_error_when_llm_unavailable(self):
+        """Test: chat() gibt Fehler wenn LLM nicht verfügbar."""
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+
+        # _llm_client ist None (nicht gestartet)
+        response = await service.chat("Hallo", user_id=123)
+
+        assert response.is_error
+        assert "LLM-Service nicht verfügbar" in response.content
+
+    @pytest.mark.asyncio
+    async def test_chat_returns_error_on_llm_error(self):
+        """Test: chat() gibt Fehler wenn LLM Error wirft."""
+        from unittest.mock import AsyncMock
+
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.llm import LlmError
+        from app.discord_bot.service import DiscordBotService
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+
+        mock_llm = AsyncMock()
+        mock_llm.chat = AsyncMock(side_effect=LlmError("Connection refused"))
+        service._llm_client = mock_llm
+
+        response = await service.chat("Hallo", user_id=123)
+
+        assert response.is_error
+        assert "LLM nicht erreichbar" in response.content
+        assert "Connection refused" in response.content
+
+    @pytest.mark.asyncio
+    async def test_chat_with_system_prompt(self):
+        """Test: chat() verwendet Locutus System-Prompt."""
+        from unittest.mock import AsyncMock, patch
+
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.llm import LlmClient
+        from app.discord_bot.service import DiscordBotService, LOCUTUS_SYSTEM_PROMPT
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+
+        # Start service to initialize LlmClient
+        await service.start()
+
+        # Patch LlmClient.chat to capture the call
+        with patch.object(
+            LlmClient,
+            "chat",
+            new_callable=AsyncMock,
+            return_value="Test response",
+        ) as mock_chat:
+            response = await service.chat("Testfrage", user_id=123)
+
+            # Prüfe dass system prompt übergeben wurde
+            mock_chat.assert_called_once()
+            call_args = mock_chat.call_args
+            system_prompt = call_args.args[1]
+            assert "Locutus" in system_prompt
+            assert "knapper technischer Bot" in system_prompt
+
+        await service.stop()
+
+
 class TestServiceStatus:
     """Tests für DiscordBotService.status() (Slice 3)."""
 
