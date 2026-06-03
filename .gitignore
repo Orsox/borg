@@ -224,6 +224,7 @@ frontend/build/
 frontend/dist/
 .archon/workspaces/
 .archon/reset-backups/
+.archon/mcp/
 .archon-run-logs/
 .pi/
 .rpiv/
