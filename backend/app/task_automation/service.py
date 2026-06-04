@@ -14,6 +14,7 @@ from app.task_automation.scheduler import (
     reschedule_task,
     sse_queue,
 )
+from app.database import AsyncSessionLocal
 
 
 def _tags_to_json(tags: list[str]) -> str:
@@ -34,6 +35,8 @@ async def create_task(
     schedule: str | None = None,
     command: str | None = None,
     archon_workflow_name: str | None = None,
+    archon_workflow_template: str | None = None,
+    heartbeat_workflow_name: str | None = None,
     description: str | None = None,
     tags: list[str] | None = None,
     retry_max: int = 0,
@@ -50,6 +53,8 @@ async def create_task(
         schedule=schedule,
         command=command,
         archon_workflow_name=archon_workflow_name,
+        archon_workflow_template=archon_workflow_template,
+        heartbeat_workflow_name=heartbeat_workflow_name,
         description=description,
         tags=_tags_to_json(tags),
         retry_max=retry_max,
@@ -195,13 +200,22 @@ async def run_task_now(db: AsyncSession, task_id: int) -> int | None:
     await db.refresh(run)
     
     # Notify SSE
-    await sse_queue.put({
-        "type": "task_run_started",
-        "task_id": task_id,
-        "task_name": task.name,
-        "run_id": run.id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
+    if task.task_type == "heartbeat":
+        await sse_queue.put({
+            "type": "heartbeat_turn_started",
+            "task_id": task_id,
+            "task_name": task.name,
+            "run_id": run.id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+    else:
+        await sse_queue.put({
+            "type": "task_run_started",
+            "task_id": task_id,
+            "task_name": task.name,
+            "run_id": run.id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
     
     # Execute in background
     import asyncio
@@ -226,7 +240,13 @@ async def _execute_task_now(task_id: int, run_id: int) -> None:
         if not run:
             return
         
-        from app.task_automation.scheduler import _run_shell_command, _run_archon_workflow
+        from app.task_automation.scheduler import (
+            _run_archon_workflow,
+            _run_heartbeat_workflow,
+            _run_shell_command,
+            _run_skill_workflow,
+        )
+        from app.task_automation.models import Task as _Task, TaskRun as _TaskRun
         
         try:
             start_time = datetime.now(timezone.utc)
@@ -238,6 +258,14 @@ async def _execute_task_now(task_id: int, run_id: int) -> None:
             elif task.task_type == "archon_workflow" and task.archon_workflow_name:
                 exit_code, stdout, stderr = await _run_archon_workflow(
                     task.archon_workflow_name
+                )
+            elif task.task_type == "heartbeat" and task.heartbeat_workflow_name:
+                exit_code, stdout, stderr = await _run_heartbeat_workflow(
+                    task.heartbeat_workflow_name
+                )
+            elif task.task_type == "skill" and task.archon_workflow_template:
+                exit_code, stdout, stderr = await _run_skill_workflow(
+                    task.archon_workflow_template, task.id
                 )
             else:
                 exit_code, stdout, stderr = 1, "", "No command or workflow specified"
@@ -253,15 +281,26 @@ async def _execute_task_now(task_id: int, run_id: int) -> None:
             
             await db.commit()
             
-            await sse_queue.put({
-                "type": f"task_run_{'completed' if exit_code == 0 else 'failed'}",
-                "task_id": task_id,
-                "task_name": task.name,
-                "run_id": run_id,
-                "status": run.status,
-                "duration_ms": duration_ms,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
+            if task.task_type == "heartbeat":
+                await sse_queue.put({
+                    "type": "heartbeat_turn_completed",
+                    "task_id": task_id,
+                    "task_name": task.name,
+                    "run_id": run_id,
+                    "status": run.status,
+                    "duration_ms": duration_ms,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+            else:
+                await sse_queue.put({
+                    "type": f"task_run_{'completed' if exit_code == 0 else 'failed'}",
+                    "task_id": task_id,
+                    "task_name": task.name,
+                    "run_id": run_id,
+                    "status": run.status,
+                    "duration_ms": duration_ms,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
         except Exception as e:
             import logging
             logger = logging.getLogger(__name__)

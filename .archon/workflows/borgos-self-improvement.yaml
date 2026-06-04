@@ -1,0 +1,92 @@
+name: borgos-self-improvement
+description: |
+  Self-improvement workflow: Analyze execution history, identify patterns,
+  create or update skills, and record lessons learned.
+  Runs as a heartbeat turn to give BorgOS proactive self-improvement capability.
+provider: pi
+model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
+worktree:
+  enabled: true
+
+nodes:
+  - id: init
+    bash: |
+      mkdir -p "$ARTIFACTS_DIR/analysis" "$ARTIFACTS_DIR/skills" "$ARTIFACTS_DIR/notes"
+
+  - id: analyze-performance
+    depends_on: [init]
+    context: fresh
+    provider: pi
+    model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
+    prompt: |
+      ANALYSIS PHASE — Self-Improvement for BorgOS:
+
+      1. Review recent execution patterns (check $ARTIFACTS_DIR for prior data)
+      2. Identify recurring failures, bottlenecks, or gaps in capabilities
+      3. Look for opportunities to create new skills or improve existing ones
+      4. Consider: What tasks does the user ask about most? What fails most often?
+
+      Write your analysis to $ARTIFACTS_DIR/analysis/findings.md
+      Include:
+      - Top 3 recurring issues
+      - Top 3 capability gaps
+      - Recommended actions (create skill, update skill, fix process)
+
+    output_format:
+      type: object
+      properties:
+        recurring_issues: { type: array, items: { type: string }, default: [] }
+        capability_gaps: { type: array, items: { type: string }, default: [] }
+        recommended_actions: { type: array, items: { type: string }, default: [] }
+
+  - id: create-skills
+    depends_on: [analyze-performance]
+    context: fresh
+    provider: pi
+    model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
+    when: "$analyze-performance.output.recommended_actions | length > 0"
+    prompt: |
+      SKILL CREATION PHASE:
+
+      Based on the analysis findings, create new skills to fill identified gaps.
+      For each recommended action that involves creating a new skill:
+      1. Design the skill (name, description, model, tags, category)
+      2. Generate the Archon workflow YAML
+      3. Write the YAML to $ARTIFACTS_DIR/skills/{skill_name}.yaml
+      4. Document the new skill in $ARTIFACTS_DIR/analysis/new-skills.md
+
+  - id: create-notes
+    depends_on: [analyze-performance]
+    context: fresh
+    provider: pi
+    model: lm-studio/qwen/qwen3.5-9b
+    prompt: |
+      NOTE CREATION PHASE:
+
+      Create a concise summary note from the analysis findings.
+      Write to $ARTIFACTS_DIR/notes/self-improvement-$(date +%Y-%m-%d).md
+
+      Include:
+      - Date and time
+      - Key findings (top 3 issues, top 3 gaps)
+      - Actions taken (new skills created, existing skills updated)
+      - Lessons learned
+      - Recommendations for next heartbeat
+
+  - id: summarize
+    depends_on: [create-skills, create-notes]
+    context: fresh
+    provider: pi
+    model: lm-studio/qwen/qwen3.5-9b
+    prompt: |
+      FINAL SUMMARY for BorgOS self-improvement run.
+
+      Read the outputs from previous nodes and create a concise summary.
+      Write to $ARTIFACTS_DIR/summary.md
+
+      The summary should be actionable — what should BorgOS do next time?
+    output_format:
+      type: object
+      properties:
+        summary: { type: string }
+        next_actions: { type: array, items: { type: string }, default: [] }

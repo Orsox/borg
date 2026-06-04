@@ -9,10 +9,12 @@ from pydantic import BaseModel, Field
 class TaskCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=256)
     description: Optional[str] = Field(default=None)
-    task_type: str = Field(default="shell", pattern="^(shell|archon_workflow)$")
+    task_type: str = Field(default="shell", pattern="^(shell|archon_workflow|heartbeat|skill)$")
     schedule: Optional[str] = Field(default=None)  # cron expression
     command: Optional[str] = Field(default=None)
     archon_workflow_name: Optional[str] = Field(default=None)
+    archon_workflow_template: Optional[str] = Field(default=None)
+    heartbeat_workflow_name: Optional[str] = Field(default=None)
     is_enabled: bool = Field(default=True)
     tags: list[str] = Field(default_factory=list)
     retry_max: int = Field(default=0, ge=0, le=10)
@@ -23,10 +25,12 @@ class TaskCreate(BaseModel):
 class TaskUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=256)
     description: Optional[str] = Field(default=None)
-    task_type: Optional[str] = Field(default=None, pattern="^(shell|archon_workflow)$")
+    task_type: Optional[str] = Field(default=None, pattern="^(shell|archon_workflow|heartbeat|skill)$")
     schedule: Optional[str] = Field(default=None)
     command: Optional[str] = Field(default=None)
     archon_workflow_name: Optional[str] = Field(default=None)
+    archon_workflow_template: Optional[str] = Field(default=None)
+    heartbeat_workflow_name: Optional[str] = Field(default=None)
     is_enabled: Optional[bool] = Field(default=None)
     tags: Optional[list[str]] = Field(default=None)
     retry_max: Optional[int] = Field(default=None, ge=0, le=10)
@@ -42,6 +46,8 @@ class TaskResponse(BaseModel):
     schedule: Optional[str]
     command: Optional[str]
     archon_workflow_name: Optional[str]
+    archon_workflow_template: Optional[str] = None
+    heartbeat_workflow_name: Optional[str] = None
     is_enabled: bool
     tags: list[str]
     retry_max: int
@@ -61,6 +67,8 @@ class TaskListItem(BaseModel):
     schedule: Optional[str]
     is_enabled: bool
     tags: list[str]
+    archon_workflow_template: Optional[str] = None
+    heartbeat_workflow_name: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

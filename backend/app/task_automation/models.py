@@ -17,10 +17,16 @@ class Task(Base):
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     task_type: Mapped[str] = mapped_column(
         String(32), nullable=False, default="shell", index=True
-    )  # 'shell' or 'archon_workflow'
+    )  # 'shell', 'archon_workflow', 'heartbeat', or 'skill'
     schedule: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)  # cron expression
     command: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     archon_workflow_name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    archon_workflow_template: Mapped[Optional[str]] = mapped_column(
+        String(256), nullable=True, default=None
+    )  # For skill-type tasks: which workflow template to use
+    heartbeat_workflow_name: Mapped[Optional[str]] = mapped_column(
+        String(256), nullable=True, default=None
+    )  # For heartbeat-type tasks: which workflow to trigger on heartbeat turn
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     tags: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     retry_max: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

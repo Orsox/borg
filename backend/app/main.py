@@ -25,6 +25,8 @@ from app.second_brain import action_service as action_memory_service
 from app.task_automation.models import Task, TaskRun  # noqa: F401
 from app.task_automation.router import router as task_router
 from app.task_automation.scheduler import init_scheduler, shutdown_scheduler, reload_all_tasks
+from app.skills.router import router as skills_router
+from app.dreaming.router import router as dreaming_router
 from app.auth.service import seed_default_user
 from app.config import settings
 from app.discord_bot.router import set_bot_service, router as locutus_router
@@ -40,16 +42,18 @@ from app.shared.exceptions import (
 )
 
 START_TIME = time.time()
+logger = logging.getLogger(__name__)
 
 # Global references for Discord Bot lifecycle management
 _bot_service: DiscordBotService | None = None
 _sse_listener: TaskEventListener | None = None
 _bot_client: BotClient | None = None
+_bot_task: asyncio.Task | None = None
 
 
 async def _init_discord_bot() -> None:
     """Initialisiere Locutus Discord-Bot."""
-    global _bot_service, _sse_listener, _bot_client
+    global _bot_service, _sse_listener, _bot_client, _bot_task
 
     config = BotConfig.from_env()
     errors = config.validate()
@@ -88,15 +92,29 @@ async def _init_discord_bot() -> None:
             return
 
         logger.info("Starting BotClient...")
-        await _bot_client.start(token)
+        _bot_task = asyncio.create_task(_bot_client.start(token), name="locutus-bot")
+        _bot_task.add_done_callback(_log_bot_task_result)
+        await _bot_client.wait_until_ready(timeout=30.0)
         logger.info("Discord Bot 'Locutus' initialized")
     except Exception as e:
         logger.error(f"Failed to initialize Discord Bot: {e}")
 
 
+def _log_bot_task_result(task: asyncio.Task) -> None:
+    """Logge Discord-Bot-Startfehler aus dem Hintergrund-Task."""
+    if task.cancelled():
+        return
+    try:
+        exc = task.exception()
+    except asyncio.CancelledError:
+        return
+    if exc:
+        logger.error("Discord Bot task failed", exc_info=exc)
+
+
 async def _shutdown_discord_bot() -> None:
     """Shutdown Locutus Discord-Bot."""
-    global _bot_service, _sse_listener, _bot_client
+    global _bot_service, _sse_listener, _bot_client, _bot_task
 
     if _sse_listener:
         await _sse_listener.stop()
@@ -105,6 +123,14 @@ async def _shutdown_discord_bot() -> None:
     if _bot_client:
         await _bot_client.close()
         logger.info("BotClient closed")
+
+    if _bot_task and not _bot_task.done():
+        _bot_task.cancel()
+        try:
+            await _bot_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("BotClient task cancelled")
 
     if _bot_service:
         await _bot_service.stop()
@@ -133,6 +159,8 @@ async def lifespan(app: FastAPI):
         for ddl in [
             "ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0",
             "ALTER TABLE users ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT 1",
+            "ALTER TABLE tasks ADD COLUMN archon_workflow_template VARCHAR(256)",
+            "ALTER TABLE tasks ADD COLUMN heartbeat_workflow_name VARCHAR(256)",
         ]:
             try:
                 await conn.execute(text(ddl))
@@ -149,6 +177,19 @@ async def lifespan(app: FastAPI):
             await ingest_archon_run_failures(db)
         except Exception:
             pass  # log ingestion must never block startup
+
+    # Start Dreaming consolidation on startup (one-shot, non-blocking)
+    async def _run_initial_dreaming():
+        """Run one Dreaming cycle at startup to consolidate prior memory."""
+        try:
+            async with AsyncSessionLocal() as db:
+                from app.dreaming.service import run_dreaming_cycle
+                result = await run_dreaming_cycle(db, days=30, min_actions=3)
+                logger.info(f"Initial dreaming cycle: {result.get('status', 'unknown')}")
+        except Exception:
+            pass  # dreaming must never block startup
+
+    asyncio.create_task(_run_initial_dreaming())
 
     # Initialize scheduler
     await init_scheduler()
@@ -195,6 +236,8 @@ app.include_router(archon_system_router)
 app.include_router(brain_router)
 app.include_router(action_router)
 app.include_router(task_router)
+app.include_router(skills_router)
+app.include_router(dreaming_router)
 app.include_router(vault_router)
 app.include_router(locutus_router)
 
@@ -210,5 +253,7 @@ async def health():
             "archon_hub": "online",
             "second_brain": "online",
             "task_automation": "online",
+            "skills": "online",
+            "dreaming": "online",
         },
     }

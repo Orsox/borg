@@ -16,6 +16,8 @@ from app.task_automation.schemas import (
     TaskUpdate,
     ToggleResponse,
 )
+
+# PaginatedTasks is used by list_tasks and list_skills; keep for compatibility
 from app.auth.router import get_current_user
 from app.database import get_session
 
@@ -35,6 +37,8 @@ async def create_task(
         schedule=body.schedule,
         command=body.command,
         archon_workflow_name=body.archon_workflow_name,
+        archon_workflow_template=body.archon_workflow_template,
+        heartbeat_workflow_name=body.heartbeat_workflow_name,
         description=body.description,
         tags=body.tags,
         retry_max=body.retry_max,
@@ -49,6 +53,8 @@ async def create_task(
         schedule=task.schedule,
         command=task.command,
         archon_workflow_name=task.archon_workflow_name,
+        archon_workflow_template=task.archon_workflow_template,
+        heartbeat_workflow_name=task.heartbeat_workflow_name,
         is_enabled=task.is_enabled,
         tags=json.loads(task.tags) if task.tags else [],
         retry_max=task.retry_max,
@@ -87,6 +93,8 @@ async def list_tasks(
                 schedule=t.schedule,
                 is_enabled=t.is_enabled,
                 tags=json.loads(t.tags) if t.tags else [],
+                archon_workflow_template=t.archon_workflow_template,
+                heartbeat_workflow_name=t.heartbeat_workflow_name,
                 created_at=t.created_at,
                 updated_at=t.updated_at,
             )
@@ -116,6 +124,8 @@ async def get_task(
         schedule=task.schedule,
         command=task.command,
         archon_workflow_name=task.archon_workflow_name,
+        archon_workflow_template=task.archon_workflow_template,
+        heartbeat_workflow_name=task.heartbeat_workflow_name,
         is_enabled=task.is_enabled,
         tags=json.loads(task.tags) if task.tags else [],
         retry_max=task.retry_max,
@@ -144,6 +154,8 @@ async def update_task(
         schedule=task.schedule,
         command=task.command,
         archon_workflow_name=task.archon_workflow_name,
+        archon_workflow_template=task.archon_workflow_template,
+        heartbeat_workflow_name=task.heartbeat_workflow_name,
         is_enabled=task.is_enabled,
         tags=json.loads(task.tags) if task.tags else [],
         retry_max=task.retry_max,
@@ -178,6 +190,31 @@ async def toggle_task(
     return ToggleResponse(**result)
 
 
+@router.get("/stream")
+async def sse_stream(
+    _user=Depends(get_current_user),
+):
+    """Server-Sent Events endpoint for real-time task notifications."""
+    async def event_generator():
+        from app.task_automation.scheduler import sse_queue
+        while True:
+            try:
+                event = await sse_queue.get()
+                yield f"data: {json.dumps(event)}\n\n"
+            except Exception:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'Stream disconnected'})}\n\n"
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.post("/{task_id}/run", response_model=TaskRunTriggerResponse)
 async def run_task_now(
     task_id: int,
@@ -190,7 +227,7 @@ async def run_task_now(
     return TaskRunTriggerResponse(task_run_id=run_id, message="Task triggered")
 
 
-@router.get("/{task_id}/runs", response_model=PaginatedTasks)
+@router.get("/{task_id}/runs")
 async def get_task_runs(
     task_id: int,
     page: int = Query(default=1, ge=1),
@@ -224,28 +261,3 @@ async def get_task_runs(
         "size": result["size"],
         "pages": result["pages"],
     }
-
-
-@router.get("/stream")
-async def sse_stream(
-    _user=Depends(get_current_user),
-):
-    """Server-Sent Events endpoint for real-time task notifications."""
-    async def event_generator():
-        from app.task_automation.scheduler import sse_queue
-        while True:
-            try:
-                event = await sse_queue.get()
-                yield f"data: {json.dumps(event)}\n\n"
-            except Exception:
-                yield f"data: {json.dumps({'type': 'error', 'message': 'Stream disconnected'})}\n\n"
-    
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )

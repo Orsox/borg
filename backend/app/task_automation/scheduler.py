@@ -107,13 +107,22 @@ async def _execute_task(task_id: int) -> None:
         await db.refresh(run)
         
         # Notify SSE
-        await sse_queue.put({
-            "type": "task_run_started",
-            "task_id": task_id,
-            "task_name": task.name,
-            "run_id": run.id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
+        if task.task_type == "heartbeat":
+            await sse_queue.put({
+                "type": "heartbeat_turn_started",
+                "task_id": task_id,
+                "task_name": task.name,
+                "run_id": run.id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        else:
+            await sse_queue.put({
+                "type": "task_run_started",
+                "task_id": task_id,
+                "task_name": task.name,
+                "run_id": run.id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
         
         try:
             start_time = datetime.now(timezone.utc)
@@ -125,6 +134,14 @@ async def _execute_task(task_id: int) -> None:
             elif task.task_type == "archon_workflow" and task.archon_workflow_name:
                 exit_code, stdout, stderr = await _run_archon_workflow(
                     task.archon_workflow_name
+                )
+            elif task.task_type == "heartbeat" and task.heartbeat_workflow_name:
+                exit_code, stdout, stderr = await _run_heartbeat_workflow(
+                    task.heartbeat_workflow_name
+                )
+            elif task.task_type == "skill" and task.archon_workflow_template:
+                exit_code, stdout, stderr = await _run_skill_workflow(
+                    task.archon_workflow_template, task.id
                 )
             else:
                 exit_code, stdout, stderr = 1, "", "No command or workflow specified"
@@ -141,15 +158,26 @@ async def _execute_task(task_id: int) -> None:
             await db.commit()
             
             # Notify SSE
-            await sse_queue.put({
-                "type": f"task_run_{'completed' if exit_code == 0 else 'failed'}",
-                "task_id": task_id,
-                "task_name": task.name,
-                "run_id": run.id,
-                "status": run.status,
-                "duration_ms": duration_ms,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
+            if task.task_type == "heartbeat":
+                await sse_queue.put({
+                    "type": "heartbeat_turn_completed",
+                    "task_id": task_id,
+                    "task_name": task.name,
+                    "run_id": run.id,
+                    "status": run.status,
+                    "duration_ms": duration_ms,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+            else:
+                await sse_queue.put({
+                    "type": f"task_run_{'completed' if exit_code == 0 else 'failed'}",
+                    "task_id": task_id,
+                    "task_name": task.name,
+                    "run_id": run.id,
+                    "status": run.status,
+                    "duration_ms": duration_ms,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
             
         except Exception as e:
             logger.error(f"Task execution error for task {task_id}: {e}")
@@ -190,6 +218,18 @@ async def _run_shell_command(command: str, timeout: int = 300) -> tuple[int, str
 async def _run_archon_workflow(workflow_name: str) -> tuple[int, str, str]:
     """Trigger an Archon workflow by name."""
     cmd = f"archon workflow run {workflow_name} --no-worktree 'Triggered by BorgOS scheduler'"
+    return await _run_shell_command(cmd, timeout=600)
+
+
+async def _run_heartbeat_workflow(workflow_name: str) -> tuple[int, str, str]:
+    """Trigger a heartbeat Archon workflow (persistent worktree, full context)."""
+    cmd = f"archon workflow run {workflow_name} --no-worktree 'Heartbeat turn by BorgOS'"
+    return await _run_shell_command(cmd, timeout=600)
+
+
+async def _run_skill_workflow(template_name: str, skill_task_id: int) -> tuple[int, str, str]:
+    """Execute a skill workflow, recording result as ActionMemory."""
+    cmd = f"archon workflow run {template_name} --no-worktree 'Skill execution for task {skill_task_id}'"
     return await _run_shell_command(cmd, timeout=600)
 
 
