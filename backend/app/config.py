@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     discord_bot_allowed_user_ids: str = Field(default="", description="Comma-separated Discord User IDs")
     discord_bot_prefix: str = Field(default="!", description="Message Prefix")
     discord_bot_mention_prefix: str = Field(default="@Locutus", description="@-Erwähnung Prefix")
+    discord_bot_llm_model_id: str = Field(default="mellum2-12b-a2.5b-instruct", description="LM Studio Modell-ID")
 
     model_config = SettingsConfigDict(
         env_file=".env",

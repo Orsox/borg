@@ -46,9 +46,12 @@ class BotClient(commands.Bot):
             service: DiscordBotService für Command-Execution
         """
         intents = discord.Intents.default()
+        # Locutus braucht message_content für message-basierte Commands
+        # (!status, @Locutus status). Guild-Member-Intents sind dafür nicht nötig
+        # und würden im Developer Portal eine zusätzliche privilegierte Freigabe
+        # verlangen.
         intents.message_content = True
         intents.guilds = True
-        intents.members = True
 
         # Command prefix ist das Bot-Prefix (z.B. "!")
         # Wir verwenden auch @-Erwähnungen, die in on_message gehandled werden.
@@ -124,7 +127,7 @@ class BotClient(commands.Bot):
         Verarbeitet eingehende Nachrichten.
 
         Filtert eigene Nachrichten, ignoriert Webhooks/Bots,
-        und dispatcht Commands wenn @-Erwähnung oder Prefix erkannt.
+        und antwortet auf alles — Commands (mit Prefix), Erwähnung oder Chat.
         """
         # Ignoriere eigene Nachrichten und Bots
         if message.author == self.user or message.author.bot:
@@ -142,41 +145,53 @@ class BotClient(commands.Bot):
                 )
                 return
 
-        # Prüfe ob Nachricht den Bot erwähnt
-        mentioned = (
-            self.user and (message.mentions and any(m.id == self.user.id for m in message.mentions))
+        # Prüfe ob Nachricht für Locutus bestimmt ist
+        bot_id = self.user.id if self.user else None
+        is_command = message.content.strip().startswith(self._config.prefix)
+        is_for_bot = bot_id and re.search(
+            rf"<@!?{bot_id}>", message.content, re.IGNORECASE
         )
 
-        if not mentioned:
+        # Command mit Prefix → Command-Handler (z.B. !status, !search foo)
+        if is_command:
+            await self._dispatch_command(message, message.content)
             return
 
-        # Extrahiere Text nach der Erwähnung
-        content = message.content
-        mention_pattern = re.compile(
-            rf"<@!?{self.user.id}>\s*(.*)", re.IGNORECASE
-        )
-        match = mention_pattern.match(content)
-        if match:
-            content = match.group(1).strip()
-        else:
-            content = ""
-
-        if not content:
-            # Bot wurde nur erwähnt, kein Command — antworte mit Help
-            await self._safe_reply(message, "Verfügbare Commands: !chat, !search, !status, !note, !help")
+        # Erwähnung → Chat mit bereinigtem Text
+        if is_for_bot:
+            clean = self._strip_mentions(message.content, bot_id)
+            if not clean.strip():
+                await self._safe_reply(message, "Hey! Schreib mir was, ich höre zu. 😊")
+                return
+            await self._chat(message, clean.strip())
             return
 
-        # Parse und dispatche Command
-        await self._dispatch(message, content)
+        # Keine Erwähnung, kein Prefix — Open-Chat-Modus:
+        # auf alle Nachrichten im Channel antworten
+        if self._config.channel_id is None and not self._config.allowed_user_ids:
+            logger.info(f"Open chat: received message from {message.author}: {message.content}")
+            await self._chat(message, message.content)
 
-    async def _dispatch(self, message: discord.Message, content: str) -> None:
+    @staticmethod
+    def _strip_mentions(content: str, bot_id: int) -> str:
         """
-        Parst eine Nachricht als Command und dispatcht sie.
+        Entferne Bot-Mention aus Nachricht.
 
         Args:
-            message: Ursprüngliche Discord-Nachricht
-            content: Text nach @-Erwähnung (ohne Prefix — Prefix wird nicht
-                     bei @-Erwähnungen erwartet, aber der Handler unterstützt es)
+            content: Roh-Text von Discord
+            bot_id: ID des Bots
+
+        Returns:
+            Text ohne Bot-Mention, gestrippt
+        """
+        mention_pattern = re.compile(rf"<@!?{bot_id}>", re.IGNORECASE)
+        return mention_pattern.sub("", content).strip()
+
+    async def _dispatch_command(self, message: discord.Message, content: str) -> None:
+        """
+        Parst eine Prefix-Nachricht als Command und dispatcht sie.
+
+        Commands wie !status, !search foo, !help etc.
         """
         try:
             command = self._handler.parse(
@@ -186,15 +201,7 @@ class BotClient(commands.Bot):
             )
 
             if command is None:
-                # Keine Command-Erkennung (z.B. keine @-Erwähnung, kein Prefix)
-                # Bei @-Erwähnungen ohne Command: behandle als Chat
-                command = self._handler.parse(
-                    f"!chat {content}",
-                    user_id=message.author.id,
-                    channel_id=message.channel.id,
-                )
-                if command is None:
-                    return
+                return
 
             response = await self._handler.handle(command)
             await self._safe_reply(message, response.content, response.is_error)
@@ -202,6 +209,22 @@ class BotClient(commands.Bot):
         except Exception as e:
             logger.error(f"Error dispatching command: {e}", exc_info=True)
             await self._safe_reply(message, f"Fehler: {str(e)}", is_error=True)
+
+    async def _chat(self, message: discord.Message, text: str) -> None:
+        """
+        Sende eine natürliche Chat-Nachricht an den LLM und antworte.
+
+        Args:
+            message: Ursprüngliche Discord-Nachricht
+            text: Bereinigter Chat-Text (ohne Mention)
+        """
+        try:
+            response = await self._service.chat(text, message.author.id)
+            await self._safe_reply(message, response.content, response.is_error)
+        except Exception as e:
+            logger.error(f"Error in chat: {e}", exc_info=True)
+            await self._safe_reply(message, "Fehler: Chat nicht verfügbar", is_error=True)
+
 
     async def _safe_reply(
         self,
@@ -227,8 +250,8 @@ class BotClient(commands.Bot):
         if len(content) > DISCORD_MAX_LENGTH:
             content = content[:DISCORD_MAX_LENGTH] + "\n… (gekürzt)"
 
-        prefix = "⚠ ERROR" if is_error else "ℹ INFO"
-        formatted = f"[{prefix}] {content}"
+        prefix = "⚠ ERROR" if is_error else None
+        formatted = f"[{prefix}] {content}" if prefix else content
 
         if len(formatted) > DISCORD_MAX_LENGTH:
             formatted = formatted[:DISCORD_MAX_LENGTH] + "…"

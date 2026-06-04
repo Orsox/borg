@@ -4,10 +4,11 @@ Locutus-Konfiguration.
 Liest Settings aus Environment Variables und pydantic-settings.
 """
 
-import os
 from typing import Optional
 
 from pydantic import BaseModel, Field
+
+from app.config import settings
 
 
 class LlmConfig(BaseModel):
@@ -34,18 +35,24 @@ class BotConfig(BaseModel):
 
     @classmethod
     def from_env(cls) -> "BotConfig":
-        """Lade Config aus Environment Variables."""
+        """
+        Lade Config aus den zentralen BorgOS Settings.
+
+        Wichtig: ``settings`` lädt ``backend/.env`` via pydantic-settings. Ein
+        direkter Zugriff über ``os.getenv`` sieht diese Werte nicht, solange sie
+        nicht zusätzlich in der Shell exportiert wurden.
+        """
         return cls(
-            enabled=os.getenv("DISCORD_BOT_ENABLED", "false").lower() == "true",
-            token=os.getenv("DISCORD_BOT_TOKEN", ""),
-            channel_id=int(os.getenv("DISCORD_BOT_CHANNEL_ID", "0") or "0") or None,
-            allowed_user_ids=[
-                int(uid)
-                for uid in os.getenv("DISCORD_BOT_ALLOWED_USER_IDS", "").split(",")
-                if uid.strip()
-            ] or None,
-            prefix=os.getenv("DISCORD_BOT_PREFIX", "!"),
-            mention_prefix=os.getenv("DISCORD_BOT_MENTION_PREFIX", "@Locutus"),
+            enabled=settings.discord_bot_enabled,
+            token=settings.discord_bot_token,
+            channel_id=settings.discord_bot_channel_id,
+            allowed_user_ids=settings.discord_bot_allowed_user_ids_list or None,
+            prefix=settings.discord_bot_prefix,
+            mention_prefix=settings.discord_bot_mention_prefix,
+            llm=LlmConfig(
+                base_url=settings.discord_bot_llm_base_url if hasattr(settings, "discord_bot_llm_base_url") else "http://localhost:1234/v1",
+                model_id=settings.discord_bot_llm_model_id,
+            ),
         )
 
     def validate(self) -> list[str]:

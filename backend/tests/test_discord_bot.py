@@ -290,6 +290,27 @@ class TestBotConfig:
         errors = config.validate()
         assert errors == []
 
+    def test_from_env_uses_app_settings(self, monkeypatch):
+        """Test: BotConfig liest zentrale Settings statt nur exportierte Env Vars."""
+        from app.config import settings
+        from app.discord_bot.config import BotConfig
+
+        monkeypatch.setattr(settings, "discord_bot_enabled", True)
+        monkeypatch.setattr(settings, "discord_bot_token", "settings-token")
+        monkeypatch.setattr(settings, "discord_bot_channel_id", 123456)
+        monkeypatch.setattr(settings, "discord_bot_allowed_user_ids", "42, 84")
+        monkeypatch.setattr(settings, "discord_bot_prefix", "?")
+        monkeypatch.setattr(settings, "discord_bot_mention_prefix", "@LocutusTest")
+
+        config = BotConfig.from_env()
+
+        assert config.enabled is True
+        assert config.token == "settings-token"
+        assert config.channel_id == 123456
+        assert config.allowed_user_ids == [42, 84]
+        assert config.prefix == "?"
+        assert config.mention_prefix == "@LocutusTest"
+
 
 class TestResponse:
     """Tests für Response-Formatierung."""
@@ -327,7 +348,7 @@ class TestBotClientInitialization:
         assert client._service == service
 
     def test_bot_has_message_intents(self):
-        """Test: BotClient hat message_content Intent aktiviert."""
+        """Test: BotClient hat nur benötigte Discord Intents aktiviert."""
         from app.discord_bot.config import BotConfig
         from app.discord_bot.service import DiscordBotService
         from app.discord_bot.bot import BotClient
@@ -338,7 +359,7 @@ class TestBotClientInitialization:
 
         assert client.intents.message_content is True
         assert client.intents.guilds is True
-        assert client.intents.members is True
+        assert client.intents.members is False
 
     def test_bot_has_no_help_command(self):
         """Test: BotClient verwendet keinen discord.py Help-Command."""
@@ -616,6 +637,45 @@ class TestBotClientPrefixResolver:
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
             result = BotClient._prefix_resolver(client, MockMessage())
             assert result is None
+
+
+class TestBotClientMentionStripping:
+    """Tests für BotClient Mention-Striping."""
+
+    def test_strip_single_mention(self):
+        """Test: <@123456> hallo wird zu halbo."""
+        from app.discord_bot.bot import BotClient
+
+        result = BotClient._strip_mentions("<@123456> hallo", bot_id=123456)
+        assert result == "hallo"
+
+    def test_strip_short_mention(self):
+        """Test: <@!123456> wie gehts wird zu wie gehts."""
+        from app.discord_bot.bot import BotClient
+
+        result = BotClient._strip_mentions("<@!123456> wie gehts", bot_id=123456)
+        assert result == "wie gehts"
+
+    def test_strip_mention_in_middle(self):
+        """Test: hallo <@123456> world wird zu hallo world."""
+        from app.discord_bot.bot import BotClient
+
+        result = BotClient._strip_mentions("hallo <@123456> world", bot_id=123456)
+        assert result == "hallo  world"
+
+    def test_strip_no_mention(self):
+        """Test: Nachricht ohne Mention bleibt unverändert."""
+        from app.discord_bot.bot import BotClient
+
+        result = BotClient._strip_mentions("hallo world", bot_id=123456)
+        assert result == "hallo world"
+
+    def test_strip_multiple_mentions(self):
+        """Test: Mehrere Mentions werden entfernt."""
+        from app.discord_bot.bot import BotClient
+
+        result = BotClient._strip_mentions("<@123456> hi <@123456> there", bot_id=123456)
+        assert result == "hi  there"
 
 
 class TestServiceSearch:
@@ -1159,7 +1219,7 @@ class TestServiceChat:
             call_args = mock_chat.call_args
             system_prompt = call_args.args[1]
             assert "Locutus" in system_prompt
-            assert "knapper technischer Bot" in system_prompt
+            assert "technischer Assistent" in system_prompt
 
         await service.stop()
 
