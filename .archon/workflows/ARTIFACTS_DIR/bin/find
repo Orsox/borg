@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+echo "ERROR: find is disabled in this workflow. Use rg --files, git ls-files, grep, ls, or Python pathlib instead." >&2
+exit 64

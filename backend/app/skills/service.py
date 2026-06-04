@@ -9,6 +9,7 @@ from sqlalchemy import func, select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.skills.models import Skill
+from app.skills.yaml_generator import generate_skill_yaml
 
 # Path to Archon workflows directory (same as archon_hub scanner)
 _DEFAULT_ARCHON_WORKFLOWS = Path(__file__).resolve().parents[3] / ".archon" / "workflows"
@@ -30,6 +31,18 @@ async def create_skill(
     if tags is None:
         tags = []
 
+    # Generate YAML first (before any DB write) so a failure leaves no partial state
+    yaml_content = generate_skill_yaml(
+        name=name,
+        description=description or "",
+        model=model or "lm-studio/qwen/qwen3.6-35b-a3b-mtp",
+        category=category or "general",
+        tags=tags or [],
+    )
+    workflow_path = _DEFAULT_ARCHON_WORKFLOWS / f"{name}.yaml"
+    workflow_path.parent.mkdir(parents=True, exist_ok=True)
+    workflow_path.write_text(yaml_content, encoding="utf-8")
+
     skill = Skill(
         name=name,
         description=description,
@@ -37,18 +50,9 @@ async def create_skill(
         tags=_tags_to_json(tags),
         category=category,
         is_active=True,
-        archon_workflow_file="",  # Filled by generate_workflow_yaml
+        archon_workflow_file=str(workflow_path),
     )
     db.add(skill)
-    await db.flush()
-
-    # Generate and write the Archon workflow YAML
-    yaml_content = _generate_workflow_yaml(skill)
-    workflow_path = _DEFAULT_ARCHON_WORKFLOWS / f"{name}.yaml"
-    workflow_path.parent.mkdir(parents=True, exist_ok=True)
-    workflow_path.write_text(yaml_content, encoding="utf-8")
-    skill.archon_workflow_file = str(workflow_path)
-
     await db.commit()
     await db.refresh(skill)
 

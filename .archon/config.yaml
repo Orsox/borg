@@ -1,0 +1,6 @@
+assistant: pi
+assistants:
+  pi:
+    model: lm-studio/qwen/qwen3.6-35b-a3b-mtp
+    enableExtensions: true
+    interactive: true

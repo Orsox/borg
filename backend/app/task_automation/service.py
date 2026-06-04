@@ -146,6 +146,9 @@ async def update_task(
     
     for key, value in kwargs.items():
         if value is not None and hasattr(task, key):
+            # Serialize list values to JSON for Text columns (tags)
+            if key == "tags" and isinstance(value, list):
+                value = json.dumps(value)
             setattr(task, key, value)
     
     task.updated_at = datetime.now(timezone.utc)
