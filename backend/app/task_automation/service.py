@@ -222,6 +222,9 @@ async def run_task_now(db: AsyncSession, task_id: int) -> int | None:
     
     # Execute in background
     import asyncio
+    # Commit the run record BEFORE spawning background execution
+    # so the background session can see it via its own query
+    await db.commit()
     asyncio.create_task(_execute_task_now(task_id, run.id))
     
     return run.id
