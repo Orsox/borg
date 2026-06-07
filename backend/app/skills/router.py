@@ -26,12 +26,13 @@ async def create_skill(
     db: AsyncSession = Depends(get_session),
     _user=Depends(get_current_user),
 ):
-    # Check for duplicate name
-    existing = await service.get_skill_by_name(db, body.name)
+    # Check for duplicate against normalized name
+    normalized = service.normalize_skill_name(body.name)
+    existing = await service.get_skill_by_name(db, normalized)
     if existing:
         raise HTTPException(
             status_code=409,
-            detail=f"Skill '{body.name}' already exists",
+            detail=f"Skill '{normalized}' already exists",
         )
 
     skill = await service.create_skill(
@@ -125,7 +126,10 @@ async def update_skill(
     db: AsyncSession = Depends(get_session),
     _user=Depends(get_current_user),
 ):
-    skill = await service.update_skill(db, skill_id, **body.model_dump(exclude_unset=True))
+    try:
+        skill = await service.update_skill(db, skill_id, **body.model_dump(exclude_unset=True))
+    except service.DuplicateSkillNameError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     if not skill:
         raise HTTPException(status_code=404, detail=f"Skill {skill_id} not found")
     return SkillResponse(

@@ -15,6 +15,7 @@ class SkillCreate(BaseModel):
 
 
 class SkillUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=256)
     description: Optional[str] = Field(default=None)
     model: Optional[str] = Field(default=None)
     tags: Optional[list[str]] = Field(default=None)

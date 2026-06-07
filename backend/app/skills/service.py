@@ -2,6 +2,7 @@
 
 import json
 import math
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from sqlalchemy import func, select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.skills.models import Skill
-from app.skills.yaml_generator import generate_skill_yaml
+from app.skills.yaml_generator import generate_skill_yaml, validate_generated_yaml
 
 # Path to Archon workflows directory (same as archon_hub scanner)
 _DEFAULT_ARCHON_WORKFLOWS = Path(__file__).resolve().parents[3] / ".archon" / "workflows"
@@ -17,6 +18,27 @@ _DEFAULT_ARCHON_WORKFLOWS = Path(__file__).resolve().parents[3] / ".archon" / "w
 
 def _tags_to_json(tags: list[str]) -> str:
     return json.dumps(tags)
+
+
+def normalize_skill_name(name: str) -> str:
+    """Public helper: normalize a skill name for duplicate detection."""
+    return _sanitize_skill_name(name)
+
+
+def _sanitize_skill_name(name: str) -> str:
+    """Sanitize a skill name for use as a workflow filename.
+
+    Converts to lowercase, replaces spaces/special chars with hyphens,
+    strips leading/trailing hyphens, and collapses multiple hyphens.
+    """
+    name = name.lower().strip()
+    name = re.sub(r'[^a-z0-9\s-]', '', name)  # remove special chars
+    name = re.sub(r'\s+', '-', name)           # spaces → hyphens
+    name = re.sub(r'-+', '-', name)             # collapse hyphens
+    name = name.strip('-')
+    if not name:
+        raise ValueError(f"Invalid skill name: {name}")
+    return name
 
 
 async def create_skill(
@@ -31,20 +53,41 @@ async def create_skill(
     if tags is None:
         tags = []
 
-    # Generate YAML first (before any DB write) so a failure leaves no partial state
+    # Sanitize name for safe file paths
+    safe_name = _sanitize_skill_name(name)
+    if safe_name != name:
+        import logging
+        logging.getLogger(__name__).warning(
+            f"Skill name '{name}' normalized to '{safe_name}' for file safety"
+        )
+
+    # Validate the generated YAML before any DB write
     yaml_content = generate_skill_yaml(
-        name=name,
+        name=safe_name,
         description=description or "",
         model=model or "lm-studio/qwen/qwen3.6-35b-a3b-mtp",
         category=category or "general",
         tags=tags or [],
     )
-    workflow_path = _DEFAULT_ARCHON_WORKFLOWS / f"{name}.yaml"
+    is_valid, errors = validate_generated_yaml(yaml_content)
+    if not is_valid:
+        raise RuntimeError(
+            f"Generated YAML is invalid for skill '{safe_name}': {errors}"
+        )
+
+    # Check for duplicate normalized name
+    existing = await db.execute(
+        select(Skill).where(Skill.name == safe_name)
+    )
+    if existing.scalar_one_or_none():
+        raise DuplicateSkillNameError(f"Skill '{safe_name}' already exists")
+
+    workflow_path = _DEFAULT_ARCHON_WORKFLOWS / f"{safe_name}.yaml"
     workflow_path.parent.mkdir(parents=True, exist_ok=True)
     workflow_path.write_text(yaml_content, encoding="utf-8")
 
     skill = Skill(
-        name=name,
+        name=safe_name,
         description=description,
         model=model,
         tags=_tags_to_json(tags),
@@ -126,6 +169,10 @@ async def list_skills(
     }
 
 
+class DuplicateSkillNameError(ValueError):
+    """Raised when a normalized skill name already exists."""
+
+
 async def update_skill(
     db: AsyncSession,
     skill_id: int,
@@ -135,22 +182,55 @@ async def update_skill(
     if not skill:
         return None
 
+    # --- Normalize and validate name rename ---
+    rename_requested = "name" in kwargs and kwargs["name"] is not None
+    if rename_requested:
+        safe_name = _sanitize_skill_name(kwargs["name"])
+        # Check for duplicate normalized name
+        existing = await db.execute(
+            select(Skill).where(Skill.name == safe_name, Skill.id != skill_id)
+        )
+        if existing.scalar_one_or_none():
+            raise DuplicateSkillNameError(f"Skill '{safe_name}' already exists")
+        kwargs["name"] = safe_name
+
+    # Apply non-name fields first, including serialized tags
     for key, value in kwargs.items():
         if value is not None and hasattr(skill, key):
-            # Serialize list values to JSON for Text columns (tags)
             if key == "tags" and isinstance(value, list):
                 value = json.dumps(value)
-            setattr(skill, key, value)
+            if key != "name":  # name handled above
+                setattr(skill, key, value)
 
     skill.updated_at = datetime.now(timezone.utc)
 
-    # If name changed, regenerate workflow YAML with new name
-    if "name" in kwargs and kwargs["name"]:
-        yaml_content = _generate_workflow_yaml(skill)
-        workflow_path = _DEFAULT_ARCHON_WORKFLOWS / f"{skill.name}.yaml"
+    # If name changed, regenerate workflow YAML with the normalized name
+    if rename_requested:
+        proposed_tags = json.loads(skill.tags) if skill.tags else []
+        yaml_content = generate_skill_yaml(
+            name=kwargs["name"],
+            description=skill.description or "",
+            model=skill.model or "lm-studio/qwen/qwen3.6-35b-a3b-mtp",
+            category=skill.category or "general",
+            tags=proposed_tags,
+        )
+        is_valid, errors = validate_generated_yaml(yaml_content)
+        if not is_valid:
+            raise RuntimeError(
+                f"Generated YAML is invalid for skill '{kwargs['name']}': {errors}"
+            )
+
+        old_path = Path(skill.archon_workflow_file) if skill.archon_workflow_file else None
+        workflow_path = _DEFAULT_ARCHON_WORKFLOWS / f"{kwargs['name']}.yaml"
         workflow_path.parent.mkdir(parents=True, exist_ok=True)
         workflow_path.write_text(yaml_content, encoding="utf-8")
+
+        # Remove old workflow file if the rename changed the path
+        if old_path and old_path.exists() and old_path != workflow_path:
+            old_path.unlink()
+
         skill.archon_workflow_file = str(workflow_path)
+        skill.name = kwargs["name"]
 
     await db.commit()
     await db.refresh(skill)
