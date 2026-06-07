@@ -11,11 +11,13 @@ Business Logic für alle Locutus-Funktionen:
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Optional
 
 from sqlalchemy import select
 
 from app.database import AsyncSessionLocal
+from app.locutus import service as locutus_service
 from app.second_brain.models import Note
 from app.second_brain.service import create_note
 
@@ -33,7 +35,40 @@ Sei freundlich, aber knapp. Keine langen Ausreden.
 Wenn du etwas nicht weißt, sag ehrlich dass du es nicht weißt.
 Formatiere Code in Backticks. Formatiere Dates als YYYY-MM-DD.
 Sprich Deutsch, wenn der User Deutsch schreibt.
+
+Kannst du eine Frage direkt und eindeutig beantworten — insbesondere mit Dingen,
+die du dir bereits gemerkt hast (siehe unten) — tu das einfach, ohne nachzufragen.
+Nur wenn eine Formulierung wirklich mehrdeutig ist (z.B. unklar ob der User eine
+neue Tatsache speichern will oder eine alte abrufen, oder ein Begriff im Kontext
+von BorgOS mehrere Bedeutungen haben könnte) und du sonst nur raten oder generisch
+antworten würdest, STELLE STATTDESSEN EINE KURZE RÜCKFRAGE. Eine Rückfrage ist nur
+dann besser als eine Antwort, wenn du sonst raten müsstest — nicht, wenn du die
+Antwort eigentlich schon kennst.
+
+Enthält die Nachricht des Users eine Anweisung, dir dauerhaft etwas zu merken
+(z.B. "merke dir...", "speicher dir...", "remember that...", "denk dran, dass...",
+auch mit Tippfehlern, anderer Wortstellung oder in einer anderen Sprache), beginne
+deine Antwort mit GENAU EINER Zeile in folgendem Format:
+[MEMORY: <die zu merkende Tatsache als knapper, eigenständiger Satz, in der Sprache der Nachricht>]
+Direkt danach folgt deine normale, freundliche Bestätigung in natürlicher Sprache.
+Enthält die Nachricht KEINE solche Anweisung, beginne deine Antwort NICHT mit "[MEMORY:".
 """
+
+# Locutus selbst entscheidet (als Teil seiner Antwort), ob eine Nachricht eine
+# "merke dir..."-Anweisung ist — Regex gegen freie Nutzereingaben kann mit der
+# Vielfalt menschlicher Formulierung (Tippfehler, Wortstellung, Sprachmischung)
+# nicht mithalten. Stattdessen markiert das Modell erkannte Anweisungen mit einem
+# kontrollierten "[MEMORY: <fakt>]"-Präfix (siehe System-Prompt); geparst wird nur
+# dieses feste, von uns vorgegebene Format — nicht die freie User-Eingabe. Das ist
+# dasselbe Prinzip wie bei gap_analysis._draft_proposed_solution: das LLM denkt,
+# der Code hält nur einen festen Vertrag ein.
+_MEMORY_DIRECTIVE_RE = re.compile(r"^\s*\[memory:\s*(.+?)\]\s*\n?(.*)", re.IGNORECASE | re.DOTALL)
+
+_MEMORY_RECALL_LIMIT = 8
+
+
+def _memory_title(content: str, limit: int = 80) -> str:
+    return content if len(content) <= limit else content[: limit - 1].rstrip() + "…"
 
 
 class DiscordBotService:
@@ -73,8 +108,30 @@ class DiscordBotService:
             )
 
         try:
+            system_prompt = LOCUTUS_SYSTEM_PROMPT
+            async with AsyncSessionLocal() as db:
+                memories = await locutus_service.list_character_memories(db, size=_MEMORY_RECALL_LIMIT)
+            recalled = [m for m in memories["items"] if m.content]
+            if recalled:
+                lines = "\n".join(f"- {m.title}: {m.content}" for m in recalled)
+                system_prompt += (
+                    "\n\nDinge, die du dir bereits über Orsox und BorgOS gemerkt hast "
+                    f"(nutze sie, wenn relevant):\n{lines}"
+                )
+
             messages = [{"role": "user", "content": message}]
-            answer = await self._llm_client.chat(messages, LOCUTUS_SYSTEM_PROMPT)
+            answer = await self._llm_client.chat(messages, system_prompt)
+
+            directive = _MEMORY_DIRECTIVE_RE.match(answer)
+            if directive:
+                fact = directive.group(1).strip()
+                reply = directive.group(2).strip()
+                async with AsyncSessionLocal() as db:
+                    entry = await locutus_service.create_character_memory(
+                        db, title=_memory_title(fact), content=fact, category="user-instruction"
+                    )
+                return Response(content=reply or f"✅ Gemerkt: {entry.title}")
+
             return Response(content=answer)
 
         except LlmError as e:
@@ -311,10 +368,26 @@ class DiscordBotService:
                 note = await create_note(db, title=title, content=note_content, tags=[])
                 await db.commit()
 
+                await locutus_service.record_action(
+                    db,
+                    actor="discord_bot",
+                    action="note_create",
+                    target=str(note.id),
+                    payload_summary=title,
+                )
+
                 return Response(content=f"Notiz erstellt: {title} (ID: {note.id})")
 
         except Exception as e:
             logger.error(f"Create note error: {e}")
+            async with AsyncSessionLocal() as db:
+                await locutus_service.record_action(
+                    db,
+                    actor="discord_bot",
+                    action="note_create",
+                    result="error",
+                    payload_summary=str(e)[:500],
+                )
             return Response(
                 content=f"Fehler: Notiz-Erstellung fehlgeschlagen — {str(e)}",
                 is_error=True,

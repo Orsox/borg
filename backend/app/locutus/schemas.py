@@ -1,7 +1,7 @@
 """Pydantic schemas for Locutus module."""
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -130,6 +130,13 @@ class ReasoningLogListItem(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ReasoningLogDecision(BaseModel):
+    """The explicit human approve/reject decision — the ADVISOR boundary made concrete."""
+
+    decision: Literal["approve", "reject"]
+    note: Optional[str] = Field(default=None)
+
+
 class PaginatedReasoningLogs(BaseModel):
     items: list[ReasoningLogListItem]
     total: int
@@ -256,3 +263,26 @@ class GapAnalysisResponse(BaseModel):
     gaps: list[SkillGap]
     analyzed_at: datetime
     total_failures_analyzed: int
+
+
+# --- Audit Trail ---
+
+class AuditEntryResponse(BaseModel):
+    id: int
+    run_id: Optional[str]
+    actor: str
+    action: str
+    target: Optional[str]
+    payload_summary: Optional[str]
+    result: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class PaginatedAuditEntries(BaseModel):
+    items: list[AuditEntryResponse]
+    total: int
+    page: int
+    size: int
+    pages: int

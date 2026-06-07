@@ -311,6 +311,15 @@ class TestBotConfig:
         assert config.prefix == "?"
         assert config.mention_prefix == "@LocutusTest"
 
+    def test_dreaming_interval_setting_default_and_override(self, monkeypatch):
+        """Test: locutus_dreaming_interval_minutes hat sinnvollen Default und ist via Settings überschreibbar."""
+        from app.config import settings
+
+        assert settings.locutus_dreaming_interval_minutes == 360
+
+        monkeypatch.setattr(settings, "locutus_dreaming_interval_minutes", 30)
+        assert settings.locutus_dreaming_interval_minutes == 30
+
 
 class TestResponse:
     """Tests für Response-Formatierung."""
@@ -502,6 +511,120 @@ class TestTaskEventListener:
         assert len(received) == 1
         assert "fehlgeschlagen" in received[0]
         assert "Connection timeout" in received[0]
+
+        await listener.stop()
+
+    @pytest.mark.asyncio
+    async def test_listener_processes_dreaming_started_event(self):
+        """Test: TaskEventListener verarbeitet dreaming_run_started Event."""
+        from app.discord_bot.listener import TaskEventListener
+
+        received = []
+
+        async def mock_callback(content: str) -> None:
+            received.append(content)
+
+        listener = TaskEventListener(mock_callback)
+        await listener.start()
+
+        event = {
+            "type": "dreaming_run_started",
+            "run_id": 7,
+            "days": 14,
+            "min_actions": 5,
+            "timestamp": "2026-06-03T16:00:00Z",
+        }
+        await listener._process_event(event)
+
+        assert len(received) == 1
+        assert "#7" in received[0]
+        assert "gestartet" in received[0]
+
+        await listener.stop()
+
+    @pytest.mark.asyncio
+    async def test_listener_processes_dreaming_completed_with_notes(self):
+        """Test: TaskEventListener verarbeitet erfolgreiches dreaming_run_completed Event."""
+        from app.discord_bot.listener import TaskEventListener
+
+        received = []
+
+        async def mock_callback(content: str) -> None:
+            received.append(content)
+
+        listener = TaskEventListener(mock_callback)
+        await listener.start()
+
+        event = {
+            "type": "dreaming_run_completed",
+            "run_id": 7,
+            "status": "success",
+            "notes_created": 1,
+            "timestamp": "2026-06-03T16:00:00Z",
+        }
+        await listener._process_event(event)
+
+        assert len(received) == 1
+        assert "#7" in received[0]
+        assert "abgeschlossen" in received[0]
+        assert "1" in received[0]
+
+        await listener.stop()
+
+    @pytest.mark.asyncio
+    async def test_listener_processes_dreaming_completed_skipped(self):
+        """Test: TaskEventListener verarbeitet übersprungenes dreaming_run_completed Event."""
+        from app.discord_bot.listener import TaskEventListener
+
+        received = []
+
+        async def mock_callback(content: str) -> None:
+            received.append(content)
+
+        listener = TaskEventListener(mock_callback)
+        await listener.start()
+
+        event = {
+            "type": "dreaming_run_completed",
+            "run_id": 7,
+            "status": "success",
+            "reason": "Only 2 actions in last 14 days — skipping (minimum: 5)",
+            "timestamp": "2026-06-03T16:00:00Z",
+        }
+        await listener._process_event(event)
+
+        assert len(received) == 1
+        assert "#7" in received[0]
+        assert "Only 2 actions" in received[0]
+
+        await listener.stop()
+
+    @pytest.mark.asyncio
+    async def test_listener_processes_dreaming_completed_failed(self):
+        """Test: TaskEventListener verarbeitet fehlgeschlagenes dreaming_run_completed Event."""
+        from app.discord_bot.listener import TaskEventListener
+
+        received = []
+
+        async def mock_callback(content: str) -> None:
+            received.append(content)
+
+        listener = TaskEventListener(mock_callback)
+        await listener.start()
+
+        event = {
+            "type": "dreaming_run_completed",
+            "run_id": 7,
+            "status": "failed",
+            "error": "boom",
+            "timestamp": "2026-06-03T16:00:00Z",
+        }
+        await listener._process_event(event)
+
+        assert len(received) == 1
+        assert "#7" in received[0]
+        assert "fehlgeschlagen" in received[0]
+        assert "boom" in received[0]
 
         await listener.stop()
 
@@ -1220,6 +1343,125 @@ class TestServiceChat:
             system_prompt = call_args.args[1]
             assert "Locutus" in system_prompt
             assert "technischer Assistent" in system_prompt
+            # Bei Unsicherheit über die Nutzerabsicht soll Locutus nachfragen statt
+            # zu raten/generisch zu antworten (statt z.B. eine mehrdeutige "was
+            # solltest du dir merken"-Frage falsch als neue Merk-Anweisung zu lesen).
+            assert "RÜCKFRAGE" in system_prompt
+            assert "ohne nachzufragen" in system_prompt
+
+        await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_chat_persists_memory_when_llm_emits_directive(self):
+        """Test: erkennt das LLM eine Merk-Anweisung (egal welche Formulierung) und
+        markiert sie mit '[MEMORY: ...]', wird der Fakt persistiert und die sichtbare
+        Antwort enthält nur die natürliche Bestätigung — nicht die Marker-Zeile.
+
+        Die Intent-Erkennung läuft über das LLM selbst (versteht beliebige Phrasing/
+        Tippfehler/Sprachen), nicht über Regex gegen die freie User-Eingabe — Code
+        parst nur das feste, von uns vorgegebene [MEMORY: ...]-Format.
+        """
+        from unittest.mock import AsyncMock
+
+        from sqlalchemy import select
+
+        from app.database import AsyncSessionLocal
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+        from app.locutus.models import CharacterMemoryEntry
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+
+        mock_llm = AsyncMock()
+        mock_llm.chat = AsyncMock(
+            return_value=(
+                "[MEMORY: Locutus hat jetzt Zugriff auf einen eigenen Docker zum Ausprobieren von Programmen]\n"
+                "Verstanden, das merke ich mir!"
+            )
+        )
+        service._llm_client = mock_llm
+
+        response = await service.chat(
+            "Okay locutus merke die das du nun einen Docker hast in dem du Programme ausprobieren kannst",
+            user_id=123,
+        )
+
+        assert not response.is_error
+        assert response.content == "Verstanden, das merke ich mir!"
+        assert "[MEMORY:" not in response.content
+        mock_llm.chat.assert_called_once()
+
+        async with AsyncSessionLocal() as db:
+            entries = (await db.execute(select(CharacterMemoryEntry))).scalars().all()
+
+        assert len(entries) == 1
+        assert entries[0].content == "Locutus hat jetzt Zugriff auf einen eigenen Docker zum Ausprobieren von Programmen"
+        assert entries[0].category == "user-instruction"
+
+    @pytest.mark.asyncio
+    async def test_chat_does_not_persist_when_llm_omits_directive(self):
+        """Test: ohne '[MEMORY: ...]'-Marker in der LLM-Antwort wird nichts persistiert
+        — eine normale Frage darf nicht versehentlich als Merk-Anweisung enden."""
+        from unittest.mock import AsyncMock
+
+        from sqlalchemy import select
+
+        from app.database import AsyncSessionLocal
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+        from app.locutus.models import CharacterMemoryEntry
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+
+        mock_llm = AsyncMock()
+        mock_llm.chat = AsyncMock(return_value="Mir geht es gut, danke der Nachfrage!")
+        service._llm_client = mock_llm
+
+        response = await service.chat("Wie geht es dir heute?", user_id=123)
+
+        assert not response.is_error
+        assert response.content == "Mir geht es gut, danke der Nachfrage!"
+
+        async with AsyncSessionLocal() as db:
+            entries = (await db.execute(select(CharacterMemoryEntry))).scalars().all()
+
+        assert entries == []
+
+    @pytest.mark.asyncio
+    async def test_chat_recalls_stored_memories_in_system_prompt(self):
+        """Test: bereits gespeicherte CharacterMemoryEntries werden in den System-Prompt injiziert."""
+        from unittest.mock import AsyncMock, patch
+
+        from app.database import AsyncSessionLocal
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.llm import LlmClient
+        from app.discord_bot.service import DiscordBotService
+        from app.locutus import service as locutus_service
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+        await service.start()
+
+        async with AsyncSessionLocal() as db:
+            await locutus_service.create_character_memory(
+                db,
+                title="Docker-Zugriff",
+                content="Locutus kann jetzt einen eigenen Docker zum Bauen von Funktionen nutzen.",
+                category="user-instruction",
+            )
+
+        with patch.object(
+            LlmClient, "chat", new_callable=AsyncMock, return_value="Test response"
+        ) as mock_chat:
+            response = await service.chat("Was hast du dir gemerkt?", user_id=123)
+
+            assert not response.is_error
+            mock_chat.assert_called_once()
+            system_prompt = mock_chat.call_args.args[1]
+            assert "Docker-Zugriff" in system_prompt
+            assert "eigenen Docker zum Bauen von Funktionen" in system_prompt
 
         await service.stop()
 

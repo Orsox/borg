@@ -11,6 +11,7 @@ Inspired by OpenClaw's memory-core dreaming system.
 """
 
 import json
+import logging
 import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -23,6 +24,8 @@ from app.second_brain.models import Note
 from app.second_brain import action_service
 from app.second_brain.service import create_note as _create_note
 from app.second_brain.action_models import ActionMemory
+
+logger = logging.getLogger(__name__)
 
 
 def _filter_recent_actions(
@@ -122,7 +125,7 @@ async def _create_dream_note(
     db: AsyncSession,
     patterns: dict[str, Any],
     run: DreamingRun,
-) -> "Note" | None:
+) -> Note | None:
     """Deep phase: create a Second Brain note from extracted patterns.
 
     The note summarizes:
@@ -275,6 +278,27 @@ async def run_dreaming_cycle(
         })
         await db.commit()
 
+        # Final step: turn recurring failure patterns into draft proposals for review.
+        # Never lets gap analysis failures sour an otherwise-successful dreaming run.
+        new_proposals: list[dict[str, Any]] = []
+        try:
+            from app.locutus.gap_analysis import run_gap_analysis
+
+            new_logs = await run_gap_analysis(db, recent_actions, run_id=f"dreaming-{run.id}")
+            new_proposals = [
+                {"id": log.id, "title": log.title, "trigger_description": log.trigger_description}
+                for log in new_logs
+            ]
+            if new_proposals:
+                await sse_queue.put({
+                    "type": "gap_analysis_completed",
+                    "run_id": run.id,
+                    "proposals": new_proposals,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+        except Exception:
+            logger.exception(f"Gap analysis failed for dreaming run #{run.id}")
+
         return {
             "status": "success",
             "run_id": run.id,
@@ -282,6 +306,7 @@ async def run_dreaming_cycle(
             "patterns_found": run.patterns_found,
             "notes_created": run.notes_created,
             "note_title": note.title if note else None,
+            "gap_proposals": new_proposals,
         }
 
     except Exception as e:

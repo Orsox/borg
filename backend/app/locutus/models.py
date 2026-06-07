@@ -169,3 +169,29 @@ class SkillRecord(Base):
     )
 
     reasoning_log: Mapped[Optional["ReasoningLog"]] = relationship("ReasoningLog")
+
+
+class LocutusAuditEntry(Base):
+    """Append-only record of mutating actions Locutus performs — observability foundation for autonomy."""
+
+    __tablename__ = "locutus_audit_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # Optional grouping id for actions belonging to the same run/cycle
+    run_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    # Who performed the action: "locutus", "user", "discord_bot", ...
+    actor: Mapped[str] = mapped_column(String(64), nullable=False, default="locutus", index=True)
+    # What happened, e.g. "character_profile_update", "character_memory_create"
+    action: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    # What it acted on — record id, file path, etc.
+    target: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    # Short human-readable description of the action's payload
+    payload_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Outcome: "ok", "error", "denied"
+    result: Mapped[str] = mapped_column(String(16), nullable=False, default="ok", index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+        index=True,
+    )

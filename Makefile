@@ -1,4 +1,4 @@
-.PHONY: dev backend frontend install test clean
+.PHONY: dev backend frontend install test clean sandbox-image
 
 # Install dependencies
 install:
@@ -19,6 +19,10 @@ frontend:
 # Run tests
 test:
 	cd backend && uv run pytest -v
+
+# Build the locked-down image agent_sandbox executes `active` skills in
+sandbox-image:
+	cd backend && docker build -t borg-agent-sandbox:latest -f app/agent_sandbox/Dockerfile .
 
 # Run database migrations
 migrate:

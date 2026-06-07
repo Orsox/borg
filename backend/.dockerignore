@@ -1,0 +1,10 @@
+borgos.db
+borgos.db-*
+*.db
+*.db-journal
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.env
+data/

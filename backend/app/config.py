@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     discord_bot_llm_base_url: str = Field(default="http://localhost:1234/v1", description="LM Studio API URL")
     discord_bot_llm_model_id: str = Field(default="google/gemma-4-e4b", description="LM Studio Modell-ID")
 
+    # Locutus Autonomy
+    locutus_dreaming_interval_minutes: int = Field(
+        default=360,
+        description="Minutes between automatic Locutus dreaming consolidation cycles",
+    )
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

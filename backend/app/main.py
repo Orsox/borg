@@ -33,6 +33,7 @@ from app.config import settings
 from app.discord_bot.router import set_bot_service, router as discord_locutus_router
 from app.locutus.router import router as locutus_router
 from app.locutus import service as locutus_service
+from app.agent_sandbox.router import router as agent_sandbox_router
 from app.discord_bot.config import BotConfig
 from app.discord_bot.service import DiscordBotService
 from app.discord_bot.listener import TaskEventListener
@@ -197,9 +198,10 @@ async def lifespan(app: FastAPI):
 
     # Periodic Dreaming consolidation every 6 hours
     async def _periodic_dreaming():
-        """Run Dreaming consolidation every 6 hours."""
+        """Run Dreaming consolidation on the configured interval."""
+        interval_seconds = max(60, settings.locutus_dreaming_interval_minutes * 60)
         while True:
-            await asyncio.sleep(21600)  # 6 hours
+            await asyncio.sleep(interval_seconds)
             try:
                 async with AsyncSessionLocal() as db:
                     from app.dreaming.service import run_dreaming_cycle
@@ -260,6 +262,7 @@ app.include_router(dreaming_router)
 app.include_router(vault_router)
 app.include_router(discord_locutus_router)
 app.include_router(locutus_router)
+app.include_router(agent_sandbox_router)
 
 
 @app.get("/api/health")
