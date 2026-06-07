@@ -23,7 +23,8 @@ class Settings(BaseSettings):
     discord_bot_allowed_user_ids: str = Field(default="", description="Comma-separated Discord User IDs")
     discord_bot_prefix: str = Field(default="!", description="Message Prefix")
     discord_bot_mention_prefix: str = Field(default="@Locutus", description="@-Erwähnung Prefix")
-    discord_bot_llm_model_id: str = Field(default="mellum2-12b-a2.5b-instruct", description="LM Studio Modell-ID")
+    discord_bot_llm_base_url: str = Field(default="http://localhost:1234/v1", description="LM Studio API URL")
+    discord_bot_llm_model_id: str = Field(default="google/gemma-4-e4b", description="LM Studio Modell-ID")
 
     model_config = SettingsConfigDict(
         env_file=".env",

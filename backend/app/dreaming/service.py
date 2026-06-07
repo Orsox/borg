@@ -19,6 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dreaming.models import DreamingRun
+from app.second_brain.models import Note
 from app.second_brain import action_service
 from app.second_brain.service import create_note as _create_note
 from app.second_brain.action_models import ActionMemory
@@ -29,7 +30,15 @@ def _filter_recent_actions(
 ) -> list[ActionMemory]:
     """Light phase: filter ActionMemory entries from the last N days."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    return [a for a in actions if a.created_at >= cutoff]
+    result = []
+    for a in actions:
+        dt = a.created_at
+        # Normalize naive datetimes (from SQLite) to offset-aware UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if dt >= cutoff:
+            result.append(a)
+    return result
 
 
 def _extract_patterns(actions: list[ActionMemory]) -> dict[str, Any]:
@@ -104,7 +113,7 @@ def _extract_patterns(actions: list[ActionMemory]) -> dict[str, Any]:
         "recurring_errors": recurring_errors,
         "top_categories": sorted(
             [{"category": cat, "count": count} for cat, count in category_counts.items()],
-            key=lambda x: -x[1],
+            key=lambda x: -x["count"],
         )[:5],
     }
 
@@ -113,7 +122,7 @@ async def _create_dream_note(
     db: AsyncSession,
     patterns: dict[str, Any],
     run: DreamingRun,
-) -> ActionMemory | None:
+) -> "Note" | None:
     """Deep phase: create a Second Brain note from extracted patterns.
 
     The note summarizes:

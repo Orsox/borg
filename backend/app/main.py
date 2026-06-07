@@ -23,13 +23,16 @@ from app.second_brain.router import router as brain_router
 from app.second_brain.action_router import router as action_router
 from app.second_brain import action_service as action_memory_service
 from app.task_automation.models import Task, TaskRun  # noqa: F401
+from app.locutus.models import CharacterProfile, CharacterMemoryEntry, ReasoningLog, EvolutionBudget, SkillRecord  # noqa: F401
 from app.task_automation.router import router as task_router
 from app.task_automation.scheduler import init_scheduler, shutdown_scheduler, reload_all_tasks
 from app.skills.router import router as skills_router
 from app.dreaming.router import router as dreaming_router
 from app.auth.service import seed_default_user
 from app.config import settings
-from app.discord_bot.router import set_bot_service, router as locutus_router
+from app.discord_bot.router import set_bot_service, router as discord_locutus_router
+from app.locutus.router import router as locutus_router
+from app.locutus import service as locutus_service
 from app.discord_bot.config import BotConfig
 from app.discord_bot.service import DiscordBotService
 from app.discord_bot.listener import TaskEventListener
@@ -171,6 +174,7 @@ async def lifespan(app: FastAPI):
     async with AsyncSessionLocal() as db:
         await seed_default_user(db)
         await action_memory_service.seed_default_actions(db)
+        await locutus_service.seed_default_data(db)
         # Import failed Archon runs from .archon logs (idempotent).
         try:
             from app.second_brain.archon_ingest import ingest_archon_run_failures
@@ -190,6 +194,21 @@ async def lifespan(app: FastAPI):
             pass  # dreaming must never block startup
 
     asyncio.create_task(_run_initial_dreaming())
+
+    # Periodic Dreaming consolidation every 6 hours
+    async def _periodic_dreaming():
+        """Run Dreaming consolidation every 6 hours."""
+        while True:
+            await asyncio.sleep(21600)  # 6 hours
+            try:
+                async with AsyncSessionLocal() as db:
+                    from app.dreaming.service import run_dreaming_cycle
+                    result = await run_dreaming_cycle(db, days=14, min_actions=5)
+                    logger.info(f"Periodic dreaming: {result.get('status', 'unknown')}")
+            except Exception:
+                logger.exception("Periodic dreaming failed")
+
+    asyncio.create_task(_periodic_dreaming())
 
     # Initialize scheduler
     await init_scheduler()
@@ -239,6 +258,7 @@ app.include_router(task_router)
 app.include_router(skills_router)
 app.include_router(dreaming_router)
 app.include_router(vault_router)
+app.include_router(discord_locutus_router)
 app.include_router(locutus_router)
 
 
