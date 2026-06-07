@@ -107,6 +107,31 @@ async def list_tasks(
     )
 
 
+@router.get("/stream")
+async def sse_stream(
+    _user=Depends(get_current_user),
+):
+    """Server-Sent Events endpoint for real-time task notifications."""
+    async def event_generator():
+        from app.task_automation.scheduler import sse_queue
+        while True:
+            try:
+                event = await sse_queue.get()
+                yield f"data: {json.dumps(event)}\n\n"
+            except Exception:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'Stream disconnected'})}\n\n"
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.get("/{task_id}", response_model=TaskResponse)
 async def get_task(
     task_id: int,
@@ -188,31 +213,6 @@ async def toggle_task(
     if result is None:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
     return ToggleResponse(**result)
-
-
-@router.get("/stream")
-async def sse_stream(
-    _user=Depends(get_current_user),
-):
-    """Server-Sent Events endpoint for real-time task notifications."""
-    async def event_generator():
-        from app.task_automation.scheduler import sse_queue
-        while True:
-            try:
-                event = await sse_queue.get()
-                yield f"data: {json.dumps(event)}\n\n"
-            except Exception:
-                yield f"data: {json.dumps({'type': 'error', 'message': 'Stream disconnected'})}\n\n"
-    
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
 
 
 @router.post("/{task_id}/run", response_model=TaskRunTriggerResponse)
