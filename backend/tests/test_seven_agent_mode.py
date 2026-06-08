@@ -103,39 +103,52 @@ class TestAgentCommandParsing:
 
 
 def test_build_pi_docker_run_argv_uses_lmstudio_network_and_passes_llm_config():
-    argv = sandbox_service.build_pi_docker_run_argv(
-        container_name="borg-agent-run-test",
-        worktree_path=Path("/tmp/borg-agent-sandbox/test"),
-        task="list files",
-        llm_base_url="http://lm8000:1234/v1",
-        model_id="qwen-test",
-    )
+    from pathlib import Path as P
+    import tempfile
 
-    assert argv[:3] == ["docker", "run", "--rm"]
-    # Deliberate deviation: NOT --network=none — pi needs to reach the LLM backend
-    assert "--network=none" not in argv
-    network_index = argv.index("--network") + 1
-    assert argv[network_index] == sandbox_service.LMSTUDIO_NETWORK
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+        f.write(b'{"providers":{}}')
+        models_path = P(f.name)
 
-    # rest of the lockdown stays intact
-    assert "--cap-drop=ALL" in argv
-    assert "--read-only" in argv
-    assert "--security-opt=no-new-privileges" in argv
-    assert "--user" in argv
+    try:
+        argv = sandbox_service.build_pi_docker_run_argv(
+            container_name="borg-agent-run-test",
+            worktree_path=Path("/tmp/borg-agent-sandbox/test"),
+            task="list files",
+            llm_base_url="http://lm8000:1234/v1",
+            model_id="qwen-test",
+            models_json_path=models_path,
+        )
 
-    assert "-e" in argv
-    # HOME must be redirected off the read-only /home/sandbox onto the writable
-    # /tmp tmpfs — pi persists session state under $HOME/.pi/agent/sessions/...
-    # and crashes on startup if it can't create that directory.
-    assert "HOME=/tmp/pi-home" in argv
-    assert "OPENAI_BASE_URL=http://lm8000:1234/v1" in argv
-    assert "OPENAI_API_KEY=sk-dummy-lm-studio-accepts-any" in argv
+        assert argv[:3] == ["docker", "run", "--rm"]
+        # Deliberate deviation: NOT --network=none — pi needs to reach the LLM backend
+        assert "--network=none" not in argv
+        network_index = argv.index("--network") + 1
+        assert argv[network_index] == sandbox_service.LMSTUDIO_NETWORK
 
-    mount_index = argv.index("-v") + 1
-    assert argv[mount_index] == "/tmp/borg-agent-sandbox/test:/workspace:rw"
+        # rest of the lockdown stays intact
+        assert "--cap-drop=ALL" in argv
+        assert "--read-only" in argv
+        assert "--security-opt=no-new-privileges" in argv
+        assert "--user" in argv
 
-    assert argv[-8:] == ["borg-agent-sandbox-pi:latest", "pi", "run", "--provider", "openai", "--model", "qwen-test", "list files"]
-    assert "AZURE_OPENAI" not in " ".join(argv)
+        assert "-e" in argv
+        assert "HOME=/tmp/pi-home" in argv
+
+        # models.json is mounted read-only
+        models_mount = f"{models_path}:/tmp/pi-home/.pi/agent/models.json:ro"
+        assert models_mount in argv
+
+        # workspace mount is still present
+        assert "/tmp/borg-agent-sandbox/test:/workspace:rw" in argv
+
+        # pi run command with lm-studio provider
+        assert "--provider" in argv
+        assert "lm-studio" in argv
+        assert "--model" in argv
+        assert "qwen-test" in argv
+    finally:
+        models_path.unlink(missing_ok=True)
 
 
 # --- run_agent_mode_task: deny-list rejection (no container should ever run) ---

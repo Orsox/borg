@@ -399,6 +399,7 @@ def build_pi_docker_run_argv(
     task: str,
     llm_base_url: str,
     model_id: str,
+    models_json_path: Path | None = None,
     image: str = PI_SANDBOX_IMAGE,
 ) -> list[str]:
     """Construct the `docker run` invocation for one Seven of Nine Agent Mode run.
@@ -421,8 +422,12 @@ def build_pi_docker_run_argv(
        no task description can work around, since it happens before `pi` does
        anything task-related. `/tmp` is the one writable path already mounted
        (`--tmpfs`), so pointing `$HOME` there needs no extra mount.
+
+    If `models_json_path` is provided, it is mounted read-only at
+    `/tmp/pi-home/.pi/agent/models.json` so pi discovers the "lm-studio"
+    provider configuration on startup.
     """
-    return [
+    argv = [
         "docker", "run", "--rm",
         "--name", container_name,
         "--network", LMSTUDIO_NETWORK,
@@ -437,16 +442,14 @@ def build_pi_docker_run_argv(
         "-w", "/workspace",
         "--user", "1000:1000",
         "-e", "HOME=/tmp/pi-home",
-        # LM Studio speaks OpenAI-compatible API. The OpenAI SDK (used by pi)
-        # reads OPENAI_BASE_URL from the environment to override the default
-        # https://api.openai.com/v1 endpoint. LM Studio accepts any bearer
-        # token, so we use a dummy key — the 401 from the earlier run was
-        # likely a transient network/DNS issue in the Docker network.
-        "-e", f"OPENAI_BASE_URL={llm_base_url}",
-        "-e", "OPENAI_API_KEY=sk-dummy-lm-studio-accepts-any",
-        image,
-        "pi", "run", "--provider", "openai", "--model", model_id, task,
     ]
+
+    # Mount models.json if provided (lm-studio provider config for pi)
+    if models_json_path:
+        argv.extend(["-v", f"{models_json_path}:/tmp/pi-home/.pi/agent/models.json:ro"])
+
+    argv.extend([image, "pi", "run", "--provider", "lm-studio", "--model", model_id, task])
+    return argv
 
 
 async def run_agent_mode_task(
@@ -490,6 +493,29 @@ async def run_agent_mode_task(
     try:
         agent_logger.info(f"[run] Clone ready at {clone_path}, branch {branch}")
 
+        # Write lm-studio provider config to a temporary models.json so pi
+        # discovers the provider on startup. pi loads custom providers from
+        # $HOME/.pi/agent/models.json — we mount this file read-only into the
+        # container at the expected path.
+        models_json = clone_path / ".pi-models.json"
+        models_json.write_text(
+            f"""{{
+    "providers": {{
+        "lm-studio": {{
+            "baseUrl": "{llm_base_url}",
+            "api": "openai-completions",
+            "apiKey": "lm-studio",
+            "models": [
+                {{
+                    "id": "{model_id}"
+                }}
+            ]
+        }}
+    }}
+}}"""
+        )
+        agent_logger.info(f"[run] Wrote models.json to {models_json}")
+
         container_name = f"borg-agent-run-{run_id}"
         argv = build_pi_docker_run_argv(
             container_name=container_name,
@@ -497,6 +523,7 @@ async def run_agent_mode_task(
             task=task_description,
             llm_base_url=llm_base_url,
             model_id=model_id,
+            models_json_path=models_json,
         )
         agent_logger.info(f"[run] Docker command: {' '.join(argv[:10])}...")
         agent_logger.info(f"[run] Waiting up to {_PI_RUN_TIMEOUT}s for container output")
