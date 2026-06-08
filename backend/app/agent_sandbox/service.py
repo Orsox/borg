@@ -27,6 +27,7 @@ from app.locutus.service import record_action
 from app.seven_of_nine.service import record_action as record_seven_action
 
 logger = logging.getLogger(__name__)
+agent_logger = logging.getLogger("borg.agent")
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SANDBOX_IMAGE = "borg-agent-sandbox:latest"
@@ -211,17 +212,23 @@ async def _clone_seven_repo(run_id: str, repo: str) -> tuple[Path, str]:
     clone_path = SANDBOX_BASE_DIR / run_id
     branch = f"agent-mode/{run_id}"
 
-    exit_code, _, stderr = await _run_subprocess(
+    agent_logger.info(f"[clone] Cloning {repo} from {_gitlab_remote_url(repo)}")
+    exit_code, clone_stdout, clone_stderr = await _run_subprocess(
         ["git", *_gitlab_auth_args(), "clone", _gitlab_remote_url(repo), str(clone_path)],
     )
     if exit_code != 0:
-        raise RuntimeError(f"Failed to clone {repo}: {stderr.strip()}")
+        agent_logger.error(f"[clone] Failed to clone {repo}: exit_code={exit_code} stderr={clone_stderr.strip()}")
+        raise RuntimeError(f"Failed to clone {repo}: {clone_stderr.strip()}")
+    agent_logger.info(f"[clone] Clone successful → {clone_path}")
 
-    exit_code, _, stderr = await _run_subprocess(
+    agent_logger.info(f"[clone] Creating branch {branch}")
+    exit_code, _, checkout_stderr = await _run_subprocess(
         ["git", "-C", str(clone_path), "checkout", "-b", branch],
     )
     if exit_code != 0:
-        raise RuntimeError(f"Failed to create branch {branch}: {stderr.strip()}")
+        agent_logger.error(f"[clone] Failed to create branch {branch}: exit_code={exit_code} stderr={checkout_stderr.strip()}")
+        raise RuntimeError(f"Failed to create branch {branch}: {checkout_stderr.strip()}")
+    agent_logger.info(f"[clone] Branch {branch} created")
 
     return clone_path, branch
 
@@ -244,25 +251,33 @@ async def _commit_and_push(clone_path: Path, branch: str, run_id: str, task_desc
     Returns (pushed, compare_url) on success or (False, error message) on
     failure at any of the three git steps.
     """
-    exit_code, _, stderr = await _run_subprocess(["git", "-C", str(clone_path), "add", "-A"])
+    agent_logger.info(f"[commit] git add -A")
+    exit_code, _, add_stderr = await _run_subprocess(["git", "-C", str(clone_path), "add", "-A"])
     if exit_code != 0:
-        return False, f"git add failed: {stderr.strip()}"
+        agent_logger.error(f"[commit] git add failed: exit_code={exit_code} stderr={add_stderr.strip()}")
+        return False, f"git add failed: {add_stderr.strip()}"
 
     commit_message = f"Agent Mode {run_id}: {task_description[:72]}"
-    exit_code, _, stderr = await _run_subprocess([
+    agent_logger.info(f"[commit] git commit -m \"{commit_message}\"")
+    exit_code, _, commit_stderr = await _run_subprocess([
         "git", "-C", str(clone_path),
         "-c", "user.name=Seven of Nine",
         "-c", "user.email=seven-of-nine@borgos.local",
         "commit", "-m", commit_message,
     ])
     if exit_code != 0:
-        return False, f"git commit failed: {stderr.strip()}"
+        agent_logger.error(f"[commit] git commit failed: exit_code={exit_code} stderr={commit_stderr.strip()}")
+        return False, f"git commit failed: {commit_stderr.strip()}"
+    agent_logger.info(f"[commit] Commit successful")
 
-    exit_code, _, stderr = await _run_subprocess([
+    agent_logger.info(f"[push] git push -u origin {branch}")
+    exit_code, _, push_stderr = await _run_subprocess([
         "git", *_gitlab_auth_args(), "-C", str(clone_path), "push", "-u", "origin", branch,
     ])
     if exit_code != 0:
-        return False, f"git push failed: {stderr.strip()}"
+        agent_logger.error(f"[push] git push failed: exit_code={exit_code} stderr={push_stderr.strip()}")
+        return False, f"git push failed: {push_stderr.strip()}"
+    agent_logger.info(f"[push] Push successful → {branch}")
 
     compare_url = (
         f"{settings.seven_gitlab_url}/{settings.seven_gitlab_username}/"
@@ -425,7 +440,7 @@ def build_pi_docker_run_argv(
         "-e", f"PI_LLM_BASE_URL={llm_base_url}",
         "-e", f"PI_LLM_MODEL={model_id}",
         image,
-        "pi", "run", "--yolo", "--model", model_id, task,
+        "pi", "run", "--model", model_id, task,
     ]
 
 
@@ -461,8 +476,15 @@ async def run_agent_mode_task(
         )
         raise SkillExecutionDenied(f"Task violates deny-list rule '{violation}'")
 
+    agent_logger.info(f"[run] Starting agent run {run_id}")
+    agent_logger.info(f"[run] task={_truncate(task_description, 500)}")
+    agent_logger.info(f"[run] llm_base_url={llm_base_url}")
+    agent_logger.info(f"[run] model={model_id}")
+
     clone_path, branch = await _clone_seven_repo(run_id, settings.seven_gitlab_workspace_repo)
     try:
+        agent_logger.info(f"[run] Clone ready at {clone_path}, branch {branch}")
+
         container_name = f"borg-agent-run-{run_id}"
         argv = build_pi_docker_run_argv(
             container_name=container_name,
@@ -471,22 +493,41 @@ async def run_agent_mode_task(
             llm_base_url=llm_base_url,
             model_id=model_id,
         )
+        agent_logger.info(f"[run] Docker command: {' '.join(argv[:10])}...")
+        agent_logger.info(f"[run] Waiting up to {_PI_RUN_TIMEOUT}s for container output")
         exit_code, stdout, stderr = await _run_subprocess(argv, timeout=_PI_RUN_TIMEOUT)
+
+        if exit_code != 0:
+            agent_logger.error(f"[run] Container exited with code {exit_code}")
+            agent_logger.error(f"[run] stderr (first 1000 chars): {_truncate(stderr, 1000)}")
+            agent_logger.error(f"[run] stdout (first 1000 chars): {_truncate(stdout, 1000)}")
+        else:
+            agent_logger.info(f"[run] Container exited successfully (code 0)")
+
         diff = await _capture_diff(clone_path)
+        if diff.strip():
+            agent_logger.info(f"[run] Diff produced: {len(diff)} bytes")
+        else:
+            agent_logger.info(f"[run] No diff produced (no changes)")
 
         pushed = False
         compare_url: str | None = None
         if exit_code != 0:
             push_note = "skipped — run failed"
+            agent_logger.info(f"[push] Skipped — run failed")
         elif not diff.strip():
             push_note = "skipped — no changes"
+            agent_logger.info(f"[push] Skipped — no changes")
         else:
+            agent_logger.info(f"[push] Attempting commit and push")
             pushed, push_result = await _commit_and_push(clone_path, branch, run_id, task_description)
             if pushed:
                 compare_url = push_result
                 push_note = f"pushed branch {branch} — compare: {compare_url}"
+                agent_logger.info(f"[push] Success — compare: {compare_url}")
             else:
                 push_note = f"push failed: {push_result}"
+                agent_logger.error(f"[push] Failed: {push_result}")
 
         outcome = "ok" if exit_code == 0 else "error"
         summary = (

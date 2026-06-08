@@ -134,7 +134,8 @@ def test_build_pi_docker_run_argv_uses_lmstudio_network_and_passes_llm_config():
     mount_index = argv.index("-v") + 1
     assert argv[mount_index] == "/tmp/borg-agent-sandbox/test:/workspace:rw"
 
-    assert argv[-6:] == ["pi", "run", "--yolo", "--model", "qwen-test", "list files"]
+    assert argv[-5:] == ["pi", "run", "--model", "qwen-test", "list files"]
+    assert argv[-6] == "borg-agent-sandbox-pi:latest"
 
 
 # --- run_agent_mode_task: deny-list rejection (no container should ever run) ---
