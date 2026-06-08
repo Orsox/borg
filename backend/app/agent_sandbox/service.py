@@ -437,12 +437,13 @@ def build_pi_docker_run_argv(
         "-w", "/workspace",
         "--user", "1000:1000",
         "-e", "HOME=/tmp/pi-home",
-        # LM Studio speaks OpenAI-compatible API — configure pi to use it as
-        # the "openai" provider. OPENAI_BASE_URL points to the LM Studio
-        # endpoint; OPENAI_API_KEY can be any non-empty string since LM Studio
-        # does not require authentication (it accepts any bearer token).
+        # LM Studio speaks OpenAI-compatible API. The OpenAI SDK (used by pi)
+        # reads OPENAI_BASE_URL from the environment to override the default
+        # https://api.openai.com/v1 endpoint. LM Studio accepts any bearer
+        # token, so we use a dummy key — the 401 from the earlier run was
+        # likely a transient network/DNS issue in the Docker network.
         "-e", f"OPENAI_BASE_URL={llm_base_url}",
-        "-e", "OPENAI_API_KEY=not-needed-lm-studio-no-auth",
+        "-e", "OPENAI_API_KEY=sk-dummy-lm-studio-accepts-any",
         image,
         "pi", "run", "--provider", "openai", "--model", model_id, task,
     ]
