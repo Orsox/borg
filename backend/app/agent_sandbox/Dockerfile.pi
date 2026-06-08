@@ -1,0 +1,43 @@
+# borg-agent-sandbox-pi:latest — execution image for Seven of Nine's Agent Mode.
+#
+# Variant of ./Dockerfile that adds the `pi` coding-agent CLI
+# (@earendil-works/pi-coding-agent, https://pi.dev — read/bash/edit/write tools +
+# session management). Otherwise built to the same lockdown as the base image:
+# --cap-drop=ALL, --read-only, --user 1000:1000, only the ephemeral worktree
+# mounted at /workspace.
+#
+# DELIBERATE DEVIATION from the base image's --network=none: `pi` must reach an
+# LLM backend to do anything. Containers built from this image are run attached
+# to the existing `lmstudio` Docker network (see docker-compose.yml) instead of
+# with no network at all — that network reaches only the LM Studio hosts
+# (lm3080/lm8000), nothing else. All other hardening flags stay in place; see
+# agent_sandbox/service.py::build_pi_docker_run_argv for the exact invocation.
+#
+# Build: docker build -t borg-agent-sandbox-pi:latest -f app/agent_sandbox/Dockerfile.pi .
+#
+# NOTE: `pi` requires Node >= 22.19 — Debian slim's apt repo only ships Node 20,
+# which `npm install -g @earendil-works/pi-coding-agent` accepts with an EBADENGINE
+# warning but may not run correctly. We pull Node 22.x from NodeSource instead of
+# the distro package, replacing the base image's `nodejs`/`npm`.
+
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        curl \
+        ca-certificates \
+        gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir uv pytest
+
+RUN npm install -g @earendil-works/pi-coding-agent
+
+# Match the --user 1000:1000 the sandbox always passes — the container never
+# runs as root, even though --read-only/--cap-drop=ALL would also constrain it.
+RUN useradd --uid 1000 --create-home --shell /bin/bash sandbox
+
+USER sandbox
+WORKDIR /workspace

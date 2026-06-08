@@ -1,8 +1,9 @@
 """
-Locutus Discord Bot Client.
+BorgOS Persona Discord Bot Client.
 
 discord.py Bot-Client der sich mit dem Discord-API verbindet,
 Nachrichten empfängt, Commands dispatcht und Antworten sendet.
+Wird pro Persona (Locutus, Seven of Nine, ...) mit eigenem Token instanziiert.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 import discord
 from discord.ext import commands
@@ -18,6 +19,7 @@ from discord.ext import commands
 from .config import BotConfig
 from .handlers import CommandHandler
 from .models import Command, Response
+from .service import PERSONA_COLLECTIVE
 
 if TYPE_CHECKING:
     from .service import DiscordBotService
@@ -28,25 +30,43 @@ logger = logging.getLogger(__name__)
 # Wir schneiden bei Bedarf ab und fügen ein Truncation-Hinweis hinzu.
 DISCORD_MAX_LENGTH = 1950
 
+ChatFn = Callable[[str, int], Awaitable[Response]]
+
 
 class BotClient(commands.Bot):
     """
-    Locutus Discord Bot Client.
+    Discord Bot Client für eine BorgOS-Persona (Locutus, Seven of Nine, ...).
 
-    Erbt von discord.ext.commands.Bot und integriert sich nahtlos
-    in die BorgOS-Backend-Architektur.
+    Erbt von discord.ext.commands.Bot und integriert sich nahtlos in die
+    BorgOS-Backend-Architektur. Jede Persona loggt sich mit ihrem eigenen
+    Discord-Bot-Token ein — dadurch funktionieren echte @-Erwähnungen nativ,
+    ohne textuelle Adress-Trigger-Hacks für geteilte Accounts.
     """
 
-    def __init__(self, config: BotConfig, service: DiscordBotService) -> None:
+    def __init__(
+        self,
+        config: BotConfig,
+        service: DiscordBotService,
+        persona_name: str = "Locutus",
+        persona_key: str = "locutus",
+        chat_fn: Optional[ChatFn] = None,
+    ) -> None:
         """
         Initialisiere BotClient.
 
         Args:
-            config: Locutus Bot-Konfiguration
-            service: DiscordBotService für Command-Execution
+            config: Bot-Konfiguration (Token, Channel, Prefix, ... dieser Persona)
+            service: DiscordBotService für Command-Execution (von allen Personas geteilt)
+            persona_name: Anzeigename der Persona (für Logs und Fehlermeldungen)
+            persona_key: Schlüssel der Persona für die Namens-Adressierung
+                (``service.PERSONA_LOCUTUS`` / ``service.PERSONA_SEVEN``) —
+                bestimmt, ob diese Persona auf eine adressierte Nachricht reagiert.
+            chat_fn: Service-Methode, die normale Chat-Nachrichten beantwortet
+                (z.B. ``service.chat`` oder ``service.chat_as_seven``).
+                Default: ``service.chat`` (Locutus).
         """
         intents = discord.Intents.default()
-        # Locutus braucht message_content für message-basierte Commands
+        # Persona-Bots brauchen message_content für message-basierte Commands
         # (!status, @Locutus status). Guild-Member-Intents sind dafür nicht nötig
         # und würden im Developer Portal eine zusätzliche privilegierte Freigabe
         # verlangen.
@@ -63,7 +83,10 @@ class BotClient(commands.Bot):
         )
         self._config = config
         self._service = service
-        self._handler = CommandHandler(service=service)
+        self._persona_name = persona_name
+        self._persona_key = persona_key
+        self._chat_fn: ChatFn = chat_fn or service.chat
+        self._handler = CommandHandler(service=service, persona_key=persona_key)
         self._channel: Optional[discord.TextChannel] = None
         self._ready_event: asyncio.Event = asyncio.Event()
 
@@ -89,12 +112,12 @@ class BotClient(commands.Bot):
 
     async def setup_hook(self) -> None:
         """Wird von discord.py nach dem Login aufgerufen."""
-        logger.info(f"BotClient setup: connected as {self.user}")
+        logger.info(f"BotClient setup ({self._persona_name}): connected as {self.user}")
 
     async def on_ready(self) -> None:
         """Wird aufgerufen wenn der Bot erfolgreich verbunden ist."""
         logger.info(
-            f"Locutus online! Benutzer: {self.user} (ID: {self.user.id})"
+            f"{self._persona_name} online! Benutzer: {self.user} (ID: {self.user.id})"
         )
         logger.info(f"Verbunden mit {len(self.guilds)} Guild(s)")
 
@@ -141,11 +164,11 @@ class BotClient(commands.Bot):
         if self._config.allowed_user_ids:
             if message.author.id not in self._config.allowed_user_ids:
                 logger.warning(
-                    f"Unauthorized user {message.author.id} tried to use Locutus"
+                    f"Unauthorized user {message.author.id} tried to use {self._persona_name}"
                 )
                 return
 
-        # Prüfe ob Nachricht für Locutus bestimmt ist
+        # Prüfe ob Nachricht für diese Persona bestimmt ist
         bot_id = self.user.id if self.user else None
         is_command = message.content.strip().startswith(self._config.prefix)
         is_for_bot = bot_id and re.search(
@@ -166,11 +189,20 @@ class BotClient(commands.Bot):
             await self._chat(message, clean.strip())
             return
 
-        # Keine Erwähnung, kein Prefix — Open-Chat-Modus:
-        # auf alle Nachrichten im Channel antworten
-        if self._config.channel_id is None and not self._config.allowed_user_ids:
-            logger.info(f"Open chat: received message from {message.author}: {message.content}")
-            await self._chat(message, message.content)
+        # Keine Erwähnung, kein Prefix — Namens-Adressierung in geteilten Channels:
+        # Wer per Name (oder "Collective"/"Kollektiv") angesprochen wird, ist
+        # "dran", bis ein anderer Name fällt oder die Session nach 15 Minuten
+        # Inaktivität abläuft (siehe DiscordBotService.resolve_addressee — der
+        # geteilte State stellt sicher, dass beide Bots zum selben Schluss
+        # kommen). Diese Persona antwortet nur, wenn sie selbst oder das
+        # Collective gemeint ist — sonst bleibt sie still.
+        content_stripped = message.content.strip()
+        if not content_stripped:
+            return
+
+        addressee = await self._service.resolve_addressee(message.channel.id, content_stripped)
+        if addressee in (self._persona_key, PERSONA_COLLECTIVE):
+            await self._chat(message, content_stripped)
 
     @staticmethod
     def _strip_mentions(content: str, bot_id: int) -> str:
@@ -219,12 +251,11 @@ class BotClient(commands.Bot):
             text: Bereinigter Chat-Text (ohne Mention)
         """
         try:
-            response = await self._service.chat(text, message.author.id)
+            response = await self._chat_fn(text, message.author.id)
             await self._safe_reply(message, response.content, response.is_error)
         except Exception as e:
             logger.error(f"Error in chat: {e}", exc_info=True)
             await self._safe_reply(message, "Fehler: Chat nicht verfügbar", is_error=True)
-
 
     async def _safe_reply(
         self,
@@ -264,7 +295,7 @@ class BotClient(commands.Bot):
         except discord.HTTPException as e:
             logger.error(f"Failed to send Discord message: {e}")
         except discord.Forbidden:
-            logger.error("Locutus hat keine Berechtigung, in diesem Channel zu senden")
+            logger.error(f"{self._persona_name} hat keine Berechtigung, in diesem Channel zu senden")
         except Exception as e:
             logger.error(f"Unexpected error sending Discord message: {e}")
 

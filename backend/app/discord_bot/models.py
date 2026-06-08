@@ -17,10 +17,12 @@ class CommandType(str, Enum):
     """Command-Typen die Locutus unterstützt."""
 
     CHAT = "chat"
+    CHAT_SEVEN = "chat_seven"
     SEARCH = "search"
     STATUS = "status"
     CREATE_NOTE = "create_note"
     HELP = "help"
+    AGENT_TASK = "agent_task"
 
 
 class TaskEventType(str, Enum):

@@ -93,7 +93,7 @@ async def _draft_proposed_solution(gap: SkillGap, trigger_description: str) -> s
         from app.discord_bot.config import BotConfig
         from app.discord_bot.llm import LlmClient
 
-        client = LlmClient(BotConfig.from_env().llm)
+        client = LlmClient(BotConfig.from_env_locutus().llm)
         await client.start()
         try:
             answer = await client.chat(

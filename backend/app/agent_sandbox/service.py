@@ -10,22 +10,37 @@ may run.
 """
 
 import asyncio
+import base64
 import logging
 import re
+import shutil
 import uuid
 from pathlib import Path
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.locutus.models import SkillRecord
 from app.locutus.service import record_action
+from app.seven_of_nine.service import record_action as record_seven_action
 
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SANDBOX_IMAGE = "borg-agent-sandbox:latest"
 SANDBOX_BASE_DIR = Path("/tmp/borg-agent-sandbox")
+
+# Seven of Nine's "Agent Mode" — `pi` (https://pi.dev) running inside the same
+# ephemeral-worktree/locked-down-container shape as skill execution, but on a
+# dedicated image (with `pi` baked in) and attached to the `lmstudio` network
+# instead of `--network=none`, since `pi` needs to reach an LLM backend. See
+# build_pi_docker_run_argv for the exact deviation and Dockerfile.pi for the
+# image's lockdown notes.
+PI_SANDBOX_IMAGE = "borg-agent-sandbox-pi:latest"
+LMSTUDIO_NETWORK = "lmstudio-docker_default"
+_PI_RUN_TIMEOUT = 600
 
 _OUTPUT_TRUNCATE_LIMIT = 4000
 
@@ -152,6 +167,132 @@ async def _capture_diff(worktree_path: Path) -> str:
     return stdout
 
 
+def _gitlab_remote_url(repo: str) -> str:
+    """Build the HTTPS clone URL for one of Seven's own GitLab repos."""
+    return f"{settings.seven_gitlab_url}/{settings.seven_gitlab_username}/{repo}.git"
+
+
+def _gitlab_auth_args() -> list[str]:
+    """Per-invocation `git -c` flags — inserted right after `git` in argv.
+
+    Auth header: GitLab's git-http-backend authenticates Personal Access Tokens
+    via HTTP Basic auth (`username:token`), NOT `Authorization: Bearer` — that
+    style only works against the REST API (confirmed empirically: `Bearer`
+    against the smart-HTTP endpoint triggers an interactive credential prompt
+    and fails headlessly with "could not read Username"; base64-encoded Basic
+    is accepted). Passed via `http.extraHeader` rather than embedded in the
+    remote URL (`https://user:token@host/...`), which would leak the PAT into
+    `.git/config`, `ps`, and logs — the token exists only in this one argv
+    list, which `_run_subprocess` doesn't log.
+
+    sslVerify=false: the omnibus GitLab instance forces HTTPS with a
+    self-signed certificate (confirmed empirically — `http://gitlab` answers
+    with a TLS redirect). Disabling verification for this one internal,
+    Docker-network-only host is the pragmatic trade-off; the alternative
+    (importing the self-signed CA into the image's trust store) is more
+    moving parts for the same internal-only guarantee.
+    """
+    basic = base64.b64encode(f"{settings.seven_gitlab_username}:{settings.seven_gitlab_token}".encode()).decode()
+    return [
+        "-c", f"http.extraHeader=Authorization: Basic {basic}",
+        "-c", "http.sslVerify=false",
+    ]
+
+
+async def _clone_seven_repo(run_id: str, repo: str) -> tuple[Path, str]:
+    """Clone one of Seven's own GitLab repos into a throwaway directory and check
+    out a fresh branch for this run.
+
+    Replaces _create_worktree for Agent Mode: operates entirely on Seven's own
+    GitLab remote using her PAT, never touches REPO_ROOT or the local borg
+    checkout — sidesteps that bug entirely rather than fixing it.
+    """
+    SANDBOX_BASE_DIR.mkdir(parents=True, exist_ok=True)
+    clone_path = SANDBOX_BASE_DIR / run_id
+    branch = f"agent-mode/{run_id}"
+
+    exit_code, _, stderr = await _run_subprocess(
+        ["git", *_gitlab_auth_args(), "clone", _gitlab_remote_url(repo), str(clone_path)],
+    )
+    if exit_code != 0:
+        raise RuntimeError(f"Failed to clone {repo}: {stderr.strip()}")
+
+    exit_code, _, stderr = await _run_subprocess(
+        ["git", "-C", str(clone_path), "checkout", "-b", branch],
+    )
+    if exit_code != 0:
+        raise RuntimeError(f"Failed to create branch {branch}: {stderr.strip()}")
+
+    return clone_path, branch
+
+
+async def _cleanup_clone(clone_path: Path) -> None:
+    """Remove a throwaway clone.
+
+    Simpler than _remove_worktree: each run is an independent clone of Seven's
+    remote, so there's no shared local repo/branch state to clean up afterward.
+    """
+    shutil.rmtree(clone_path, ignore_errors=True)
+
+
+async def _commit_and_push(clone_path: Path, branch: str, run_id: str, task_description: str) -> tuple[bool, str]:
+    """Commit the run's changes and push them to a throwaway branch.
+
+    Review-first, just moved up a level: only ever pushes a fresh
+    `agent-mode/{run_id}` branch, never `main`/`master` — pushing a branch is
+    the new "diff", reviewed and merged by hand via the returned compare URL.
+    Returns (pushed, compare_url) on success or (False, error message) on
+    failure at any of the three git steps.
+    """
+    exit_code, _, stderr = await _run_subprocess(["git", "-C", str(clone_path), "add", "-A"])
+    if exit_code != 0:
+        return False, f"git add failed: {stderr.strip()}"
+
+    commit_message = f"Agent Mode {run_id}: {task_description[:72]}"
+    exit_code, _, stderr = await _run_subprocess([
+        "git", "-C", str(clone_path),
+        "-c", "user.name=Seven of Nine",
+        "-c", "user.email=seven-of-nine@borgos.local",
+        "commit", "-m", commit_message,
+    ])
+    if exit_code != 0:
+        return False, f"git commit failed: {stderr.strip()}"
+
+    exit_code, _, stderr = await _run_subprocess([
+        "git", *_gitlab_auth_args(), "-C", str(clone_path), "push", "-u", "origin", branch,
+    ])
+    if exit_code != 0:
+        return False, f"git push failed: {stderr.strip()}"
+
+    compare_url = (
+        f"{settings.seven_gitlab_url}/{settings.seven_gitlab_username}/"
+        f"{settings.seven_gitlab_workspace_repo}/-/compare/main...{branch}"
+    )
+    return True, compare_url
+
+
+async def create_gitlab_repo(name: str, description: str = "") -> dict:
+    """Create a new project under Seven's own GitLab namespace.
+
+    Mirrors ArchonClient's authenticated-httpx-call shape (archon_system/client.py).
+    Triggered only via the `[GITLAB_REPO: <name>]` directive — "the model
+    decides, the code holds the fixed contract" — never from free-form input.
+    Returns the GitLab project dict (incl. `web_url`, `http_url_to_repo`).
+    """
+    url = f"{settings.seven_gitlab_url}/api/v4/projects"
+    headers = {"PRIVATE-TOKEN": settings.seven_gitlab_token}
+    payload: dict = {"name": name, "visibility": "private"}
+    if description:
+        payload["description"] = description
+
+    # verify=False: same self-signed-certificate trade-off as _gitlab_auth_args'
+    # http.sslVerify=false — internal, Docker-network-only host.
+    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0), verify=False) as client:
+        response = await client.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        return response.json()
+
+
 async def execute_skill(
     db: AsyncSession,
     skill_id: int,
@@ -234,3 +375,149 @@ async def execute_skill(
         }
     finally:
         await _remove_worktree(worktree_path, branch)
+
+
+def build_pi_docker_run_argv(
+    *,
+    container_name: str,
+    worktree_path: Path,
+    task: str,
+    llm_base_url: str,
+    model_id: str,
+    image: str = PI_SANDBOX_IMAGE,
+) -> list[str]:
+    """Construct the `docker run` invocation for one Seven of Nine Agent Mode run.
+
+    Same lockdown as build_docker_run_argv (cap-drop, read-only, resource
+    limits, --user 1000:1000, worktree-only mount) with two deliberate
+    deviations from `--network=none`/a stock `$HOME`:
+
+    1. Attached to the `lmstudio` bridge network instead of `--network=none`,
+       because `pi` has to reach an LLM backend to do anything. That network
+       reaches only the LM Studio hosts — no internet, no other containers,
+       no host filesystem. See Dockerfile.pi for the rationale.
+    2. `HOME` is redirected to the `/tmp` tmpfs. `pi` persists session state
+       under `$HOME/.pi/agent/sessions/<workspace>/` — but Dockerfile.pi's
+       `useradd --create-home sandbox` puts `$HOME` at `/home/sandbox`, which
+       lives on the `--read-only` root filesystem. Without this override `pi`
+       crashes immediately trying to create that directory (confirmed
+       empirically: "directory ... did not exist" under
+       `/home/sandbox/.pi/agent/sessions/...`) — an environment-init failure
+       no task description can work around, since it happens before `pi` does
+       anything task-related. `/tmp` is the one writable path already mounted
+       (`--tmpfs`), so pointing `$HOME` there needs no extra mount.
+    """
+    return [
+        "docker", "run", "--rm",
+        "--name", container_name,
+        "--network", LMSTUDIO_NETWORK,
+        "--cpus=2",
+        "--memory=2g",
+        "--pids-limit=256",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--read-only",
+        "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m",
+        "-v", f"{worktree_path}:/workspace:rw",
+        "-w", "/workspace",
+        "--user", "1000:1000",
+        "-e", "HOME=/tmp/pi-home",
+        "-e", f"PI_LLM_BASE_URL={llm_base_url}",
+        "-e", f"PI_LLM_MODEL={model_id}",
+        image,
+        "pi", "run", "--yolo", "--model", model_id, task,
+    ]
+
+
+async def run_agent_mode_task(
+    db: AsyncSession,
+    task_description: str,
+    llm_base_url: str,
+    model_id: str,
+    run_id: str | None = None,
+) -> dict:
+    """Run one Seven of Nine Agent Mode task: `pi` working an ephemeral worktree
+    inside a locked-down sandbox container.
+
+    Mirrors execute_skill's shape (deny-list -> worktree -> container -> capture
+    diff -> audit -> teardown), but the "skill" here is the user's free-text task
+    description handed to `pi` rather than a pre-approved SkillRecord — so the
+    deny-list is the only pre-execution gate, and the result is purely
+    informational: the diff is reported back, never auto-applied (see plan
+    "review-first, no auto-apply"). Every attempt produces exactly one
+    DroneAuditEntry with action="agent_mode_run".
+    """
+    run_id = run_id or f"agent-mode-{uuid.uuid4().hex[:8]}"
+
+    violation = check_deny_list(task_description)
+    if violation:
+        await record_seven_action(
+            db,
+            action="agent_mode_run",
+            target=run_id,
+            payload_summary=f"denied — matched deny-list rule '{violation}': {_truncate(task_description, 500)}",
+            result="denied",
+            run_id=run_id,
+        )
+        raise SkillExecutionDenied(f"Task violates deny-list rule '{violation}'")
+
+    clone_path, branch = await _clone_seven_repo(run_id, settings.seven_gitlab_workspace_repo)
+    try:
+        container_name = f"borg-agent-run-{run_id}"
+        argv = build_pi_docker_run_argv(
+            container_name=container_name,
+            worktree_path=clone_path,
+            task=task_description,
+            llm_base_url=llm_base_url,
+            model_id=model_id,
+        )
+        exit_code, stdout, stderr = await _run_subprocess(argv, timeout=_PI_RUN_TIMEOUT)
+        diff = await _capture_diff(clone_path)
+
+        pushed = False
+        compare_url: str | None = None
+        if exit_code != 0:
+            push_note = "skipped — run failed"
+        elif not diff.strip():
+            push_note = "skipped — no changes"
+        else:
+            pushed, push_result = await _commit_and_push(clone_path, branch, run_id, task_description)
+            if pushed:
+                compare_url = push_result
+                push_note = f"pushed branch {branch} — compare: {compare_url}"
+            else:
+                push_note = f"push failed: {push_result}"
+
+        outcome = "ok" if exit_code == 0 else "error"
+        summary = (
+            f"task={_truncate(task_description, 500)}\n"
+            f"exit_code={exit_code}\n"
+            f"clone={clone_path}\n"
+            f"branch={branch}\n"
+            f"push={push_note}\n"
+            f"--- stdout ---\n{_truncate(stdout)}\n"
+            f"--- stderr ---\n{_truncate(stderr)}\n"
+            f"--- diff ---\n{_truncate(diff)}"
+        )
+        await record_seven_action(
+            db,
+            action="agent_mode_run",
+            target=run_id,
+            payload_summary=_truncate(summary),
+            result=outcome,
+            run_id=run_id,
+        )
+
+        return {
+            "run_id": run_id,
+            "exit_code": exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
+            "diff": diff,
+            "worktree_path": str(clone_path),
+            "branch": branch,
+            "pushed": pushed,
+            "compare_url": compare_url,
+        }
+    finally:
+        await _cleanup_clone(clone_path)

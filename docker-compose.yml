@@ -17,16 +17,26 @@ services:
       - ARCHON_PATH=${ARCHON_PATH:-/workspace/.archon}
       - ARCHON_API_URL=${ARCHON_API_URL:-http://host.docker.internal:3090}
       - CORS_ORIGINS=http://localhost:5173,http://localhost:1701
-      - DISCORD_BOT_LLM_BASE_URL=${DISCORD_BOT_LLM_BASE_URL:-http://lm3080:1234/v1}
-      - DISCORD_BOT_LLM_MODEL_ID=${DISCORD_BOT_LLM_MODEL_ID:-google/gemma-4-e4b}
+      - DISCORD_BOT_LOCUTUS_LLM_BASE_URL=${DISCORD_BOT_LOCUTUS_LLM_BASE_URL:-http://lm3080:1234/v1}
+      - DISCORD_BOT_LOCUTUS_LLM_MODEL_ID=${DISCORD_BOT_LOCUTUS_LLM_MODEL_ID:-google/gemma-4-e4b}
+      - DISCORD_BOT_SEVEN_LLM_BASE_URL=${DISCORD_BOT_SEVEN_LLM_BASE_URL:-http://lm8000:1234/v1}
+      - DISCORD_BOT_SEVEN_LLM_MODEL_ID=${DISCORD_BOT_SEVEN_LLM_MODEL_ID:-qwen/qwen3.6-35b-a3b-mtp}
     networks:
       - default
       - lmstudio
+      - gitlab
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - borgos-data:/app/data
       - ./.archon:/workspace/.archon:ro
+      # Docker-outside-of-Docker: app.agent_sandbox.service drives sandbox
+      # containers via `docker run ...` subprocess calls — this gives the
+      # backend container the same Docker access as the host user (it can
+      # launch/stop/inspect ANY container on the host, not just sandboxed
+      # ones). Deliberate, scoped trade-off, same spirit as the `--network`
+      # deviation documented in agent_sandbox/Dockerfile.pi.
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
@@ -55,3 +65,11 @@ networks:
   lmstudio:
     external: true
     name: lmstudio-docker_default
+  # Seven of Nine's own GitLab account lives on a self-hosted instance running
+  # as a separate compose project — join its network to clone/commit/push as
+  # her, instead of operating on the local checkout (see agent_sandbox.service).
+  # Note: the upstream project's network is literally named "gilab-docker_default"
+  # (typo and all) — verified via `docker network ls`.
+  gitlab:
+    external: true
+    name: gilab-docker_default
