@@ -128,14 +128,13 @@ def test_build_pi_docker_run_argv_uses_lmstudio_network_and_passes_llm_config():
     # /tmp tmpfs — pi persists session state under $HOME/.pi/agent/sessions/...
     # and crashes on startup if it can't create that directory.
     assert "HOME=/tmp/pi-home" in argv
-    assert "PI_LLM_BASE_URL=http://lm8000:1234/v1" in argv
-    assert "PI_LLM_MODEL=qwen-test" in argv
+    assert "OPENAI_BASE_URL=http://lm8000:1234/v1" in argv
+    assert "OPENAI_API_KEY=not-needed-lm-studio-no-auth" in argv
 
     mount_index = argv.index("-v") + 1
     assert argv[mount_index] == "/tmp/borg-agent-sandbox/test:/workspace:rw"
 
-    assert argv[-5:] == ["pi", "run", "--model", "qwen-test", "list files"]
-    assert argv[-6] == "borg-agent-sandbox-pi:latest"
+    assert argv[-8:] == ["borg-agent-sandbox-pi:latest", "pi", "run", "--provider", "openai", "--model", "qwen-test", "list files"]
 
 
 # --- run_agent_mode_task: deny-list rejection (no container should ever run) ---

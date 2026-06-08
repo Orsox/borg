@@ -437,10 +437,14 @@ def build_pi_docker_run_argv(
         "-w", "/workspace",
         "--user", "1000:1000",
         "-e", "HOME=/tmp/pi-home",
-        "-e", f"PI_LLM_BASE_URL={llm_base_url}",
-        "-e", f"PI_LLM_MODEL={model_id}",
+        # LM Studio speaks OpenAI-compatible API — configure pi to use it as
+        # the "openai" provider. OPENAI_BASE_URL points to the LM Studio
+        # endpoint; OPENAI_API_KEY can be any non-empty string since LM Studio
+        # does not require authentication (it accepts any bearer token).
+        "-e", f"OPENAI_BASE_URL={llm_base_url}",
+        "-e", "OPENAI_API_KEY=not-needed-lm-studio-no-auth",
         image,
-        "pi", "run", "--model", model_id, task,
+        "pi", "run", "--provider", "openai", "--model", model_id, task,
     ]
 
 
