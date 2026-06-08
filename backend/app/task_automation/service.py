@@ -37,6 +37,8 @@ async def create_task(
     archon_workflow_name: str | None = None,
     archon_workflow_template: str | None = None,
     heartbeat_workflow_name: str | None = None,
+    dreaming_days: int = 14,
+    dreaming_min_actions: int = 5,
     description: str | None = None,
     tags: list[str] | None = None,
     retry_max: int = 0,
@@ -55,6 +57,8 @@ async def create_task(
         archon_workflow_name=archon_workflow_name,
         archon_workflow_template=archon_workflow_template,
         heartbeat_workflow_name=heartbeat_workflow_name,
+        dreaming_days=dreaming_days,
+        dreaming_min_actions=dreaming_min_actions,
         description=description,
         tags=_tags_to_json(tags),
         retry_max=retry_max,
@@ -251,6 +255,7 @@ async def _execute_task_now(task_id: int, run_id: int) -> None:
             _run_heartbeat_workflow,
             _run_shell_command,
             _run_skill_workflow,
+            _run_dreaming_task,
         )
         from app.task_automation.models import Task as _Task, TaskRun as _TaskRun
         
@@ -272,6 +277,10 @@ async def _execute_task_now(task_id: int, run_id: int) -> None:
             elif task.task_type == "skill" and task.archon_workflow_template:
                 exit_code, stdout, stderr = await _run_skill_workflow(
                     task.archon_workflow_template, task.id
+                )
+            elif task.task_type == "dreaming":
+                exit_code, stdout, stderr = await _run_dreaming_task(
+                    task.dreaming_days, task.dreaming_min_actions
                 )
             else:
                 exit_code, stdout, stderr = 1, "", "No command or workflow specified"

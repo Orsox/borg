@@ -4,6 +4,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -24,6 +25,7 @@ from app.second_brain.action_router import router as action_router
 from app.second_brain import action_service as action_memory_service
 from app.task_automation.models import Task, TaskRun  # noqa: F401
 from app.locutus.models import CharacterProfile, CharacterMemoryEntry, ReasoningLog, EvolutionBudget, SkillRecord  # noqa: F401
+from app.seven_of_nine.models import DroneProfile, DroneMemoryEntry, DroneAuditEntry  # noqa: F401
 from app.task_automation.router import router as task_router
 from app.task_automation.scheduler import init_scheduler, shutdown_scheduler, reload_all_tasks
 from app.skills.router import router as skills_router
@@ -33,9 +35,11 @@ from app.config import settings
 from app.discord_bot.router import set_bot_service, router as discord_locutus_router
 from app.locutus.router import router as locutus_router
 from app.locutus import service as locutus_service
+from app.seven_of_nine.router import router as seven_of_nine_router
+from app.seven_of_nine import service as seven_of_nine_service
 from app.agent_sandbox.router import router as agent_sandbox_router
 from app.discord_bot.config import BotConfig
-from app.discord_bot.service import DiscordBotService
+from app.discord_bot.service import DiscordBotService, PERSONA_LOCUTUS, PERSONA_SEVEN
 from app.discord_bot.listener import TaskEventListener
 from app.discord_bot.bot import BotClient
 from app.database import Base, AsyncSessionLocal, engine
@@ -43,6 +47,14 @@ from app.shared.exceptions import (
     generic_exception_handler,
     http_exception_handler,
     validation_exception_handler,
+)
+
+# Configure root logging so that app and library loggers (discord.py, apscheduler, ...)
+# actually reach stdout — uvicorn only configures its own "uvicorn.*" loggers, leaving
+# the root logger without a handler and our logger.info/warning/error calls invisible.
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
 START_TIME = time.time()
@@ -53,53 +65,114 @@ _bot_service: DiscordBotService | None = None
 _sse_listener: TaskEventListener | None = None
 _bot_client: BotClient | None = None
 _bot_task: asyncio.Task | None = None
+_seven_bot_client: BotClient | None = None
+_seven_bot_task: asyncio.Task | None = None
+
+
+async def _connect_persona_bot(
+    client: BotClient,
+    config: BotConfig,
+    persona_name: str,
+    task_name: str,
+) -> Optional[asyncio.Task]:
+    """
+    Verbinde einen bereits konstruierten Discord-BotClient mit seinem eigenen Token.
+
+    Jede Persona (Locutus, Seven of Nine, ...) loggt sich als eigener
+    Discord-Bot-Account ein — `config` enthält ihr eigenes Token, ihren
+    eigenen Channel/Prefix etc.
+    """
+    errors = config.validate()
+    if errors:
+        logger.warning(f"{persona_name} bot config errors: {errors}")
+        return None
+
+    if not config.token:
+        logger.warning(f"{config.env_prefix}_TOKEN is empty — not connecting {persona_name} to Discord")
+        return None
+
+    logger.info(f"Starting BotClient ({persona_name})...")
+    task = asyncio.create_task(client.start(config.token), name=task_name)
+    task.add_done_callback(_log_bot_task_result)
+    await client.wait_until_ready(timeout=30.0)
+    logger.info(f"Discord Bot '{persona_name}' initialized")
+    return task
 
 
 async def _init_discord_bot() -> None:
-    """Initialisiere Locutus Discord-Bot."""
-    global _bot_service, _sse_listener, _bot_client, _bot_task
+    """Initialisiere Locutus + Seven of Nine Discord-Bots — eigene Accounts, geteilter Service.
 
-    config = BotConfig.from_env()
-    errors = config.validate()
-    if errors:
-        logger.warning(f"Discord Bot config errors: {errors}")
-        return
+    Beide Personas haben ihren eigenen ``..._ENABLED``-Schalter und ihr eigenes
+    Discord-Bot-Token, sind also unabhängig voneinander aktivierbar. Sie teilen
+    sich aber einen ``DiscordBotService`` (LLM-Clients, Memory, Audit, Notes-Zugriff).
+    """
+    global _bot_service, _sse_listener, _bot_client, _bot_task, _seven_bot_client, _seven_bot_task
 
-    if not config.enabled:
-        logger.info("Discord Bot disabled (DISCORD_BOT_ENABLED=false)")
+    locutus_config = BotConfig.from_env_locutus()
+    seven_config = BotConfig.from_env_seven()
+
+    if not locutus_config.enabled and not seven_config.enabled:
+        logger.info(
+            "Discord Bots disabled (DISCORD_BOT_LOCUTUS_ENABLED and DISCORD_BOT_SEVEN_ENABLED both false)"
+        )
         return
 
     try:
-        # Service initialisieren
-        _bot_service = DiscordBotService(config)
+        # Service initialisieren — geteilt von Locutus und Seven of Nine, braucht
+        # daher beide LLM-Configs unabhängig davon, welche Persona(s) aktiv sind.
+        _bot_service = DiscordBotService(locutus_config)
         await _bot_service.start()
         set_bot_service(_bot_service)
 
-        # Bot-Client initialisieren
-        _bot_client = BotClient(config=config, service=_bot_service)
+        if locutus_config.enabled:
+            _bot_client = BotClient(
+                config=locutus_config,
+                service=_bot_service,
+                persona_name="Locutus",
+                persona_key=PERSONA_LOCUTUS,
+                chat_fn=_bot_service.chat,
+            )
 
-        # SSE-Listener initialisieren — sendet Notifications an Discord
-        async def notification_callback(content: str) -> None:
-            """Callback für Task-Notifications."""
-            if _bot_client and _bot_client.is_ready():
-                await _bot_client.send_notification(content)
-            else:
-                logger.info(f"Notification (bot not ready): {content}")
+            # SSE-Listener initialisieren — sendet Task-Notifications an Locutus' Channel
+            async def notification_callback(content: str) -> None:
+                """Callback für Task-Notifications."""
+                if _bot_client and _bot_client.is_ready():
+                    await _bot_client.send_notification(content)
+                else:
+                    logger.info(f"Notification (bot not ready): {content}")
 
-        _sse_listener = TaskEventListener(notification_callback)
-        await _sse_listener.start()
+            _sse_listener = TaskEventListener(notification_callback)
+            await _sse_listener.start()
 
-        # Bot verbinden
-        token = config.token
-        if not token:
-            logger.warning("DISCORD_BOT_TOKEN is empty — not connecting to Discord")
-            return
+            _bot_task = await _connect_persona_bot(_bot_client, locutus_config, "Locutus", "locutus-bot")
+        else:
+            logger.info("Locutus bot disabled (DISCORD_BOT_LOCUTUS_ENABLED=false)")
 
-        logger.info("Starting BotClient...")
-        _bot_task = asyncio.create_task(_bot_client.start(token), name="locutus-bot")
-        _bot_task.add_done_callback(_log_bot_task_result)
-        await _bot_client.wait_until_ready(timeout=30.0)
-        logger.info("Discord Bot 'Locutus' initialized")
+        if seven_config.enabled:
+            _seven_bot_client = BotClient(
+                config=seven_config,
+                service=_bot_service,
+                persona_name="Seven of Nine",
+                persona_key=PERSONA_SEVEN,
+                chat_fn=_bot_service.chat_as_seven,
+            )
+
+            # Agent-Mode-Ergebnisse (Hintergrund-Runs, siehe DiscordBotService.
+            # run_agent_task) gehen als Folge-Notification an Sevens Channel —
+            # gleiche Verdrahtung wie der notification_callback oben für Locutus.
+            async def seven_notifier(content: str) -> None:
+                if _seven_bot_client and _seven_bot_client.is_ready():
+                    await _seven_bot_client.send_notification(content)
+                else:
+                    logger.info(f"Seven notification (bot not ready): {content}")
+
+            _bot_service.set_seven_notifier(seven_notifier)
+
+            _seven_bot_task = await _connect_persona_bot(
+                _seven_bot_client, seven_config, "Seven of Nine", "seven-of-nine-bot"
+            )
+        else:
+            logger.info("Seven of Nine bot disabled (DISCORD_BOT_SEVEN_ENABLED=false)")
     except Exception as e:
         logger.error(f"Failed to initialize Discord Bot: {e}")
 
@@ -116,25 +189,31 @@ def _log_bot_task_result(task: asyncio.Task) -> None:
         logger.error("Discord Bot task failed", exc_info=exc)
 
 
+async def _close_persona_bot(client: BotClient | None, task: asyncio.Task | None, persona_name: str) -> None:
+    """Schließe BotClient-Verbindung und beende den Hintergrund-Task einer Persona."""
+    if client:
+        await client.close()
+        logger.info(f"BotClient ({persona_name}) closed")
+
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        logger.info(f"BotClient ({persona_name}) task cancelled")
+
+
 async def _shutdown_discord_bot() -> None:
-    """Shutdown Locutus Discord-Bot."""
-    global _bot_service, _sse_listener, _bot_client, _bot_task
+    """Shutdown Locutus + Seven of Nine Discord-Bots."""
+    global _bot_service, _sse_listener, _bot_client, _bot_task, _seven_bot_client, _seven_bot_task
 
     if _sse_listener:
         await _sse_listener.stop()
         logger.info("TaskEventListener stopped")
 
-    if _bot_client:
-        await _bot_client.close()
-        logger.info("BotClient closed")
-
-    if _bot_task and not _bot_task.done():
-        _bot_task.cancel()
-        try:
-            await _bot_task
-        except asyncio.CancelledError:
-            pass
-        logger.info("BotClient task cancelled")
+    await _close_persona_bot(_bot_client, _bot_task, "Locutus")
+    await _close_persona_bot(_seven_bot_client, _seven_bot_task, "Seven of Nine")
 
     if _bot_service:
         await _bot_service.stop()
@@ -165,6 +244,8 @@ async def lifespan(app: FastAPI):
             "ALTER TABLE users ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT 1",
             "ALTER TABLE tasks ADD COLUMN archon_workflow_template VARCHAR(256)",
             "ALTER TABLE tasks ADD COLUMN heartbeat_workflow_name VARCHAR(256)",
+            "ALTER TABLE tasks ADD COLUMN dreaming_days INTEGER DEFAULT 14",
+            "ALTER TABLE tasks ADD COLUMN dreaming_min_actions INTEGER DEFAULT 5",
         ]:
             try:
                 await conn.execute(text(ddl))
@@ -176,6 +257,7 @@ async def lifespan(app: FastAPI):
         await seed_default_user(db)
         await action_memory_service.seed_default_actions(db)
         await locutus_service.seed_default_data(db)
+        await seven_of_nine_service.seed_default_data(db)
         # Import failed Archon runs from .archon logs (idempotent).
         try:
             from app.second_brain.archon_ingest import ingest_archon_run_failures
@@ -183,34 +265,34 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass  # log ingestion must never block startup
 
-    # Start Dreaming consolidation on startup (one-shot, non-blocking)
-    async def _run_initial_dreaming():
-        """Run one Dreaming cycle at startup to consolidate prior memory."""
+    # Initialize Dreaming task in the scheduler (replaces old _periodic_dreaming)
+    async def _init_dreaming_task():
+        """Register the Dreaming consolidation task in the scheduler."""
         try:
+            from app.task_automation.service import create_task
+            from app.task_automation.scheduler import translate_dreaming_config
+            
+            cron_expr = translate_dreaming_config(
+                settings.locutus_dreaming_time,
+                settings.locutus_dreaming_frequency
+            )
+            
             async with AsyncSessionLocal() as db:
-                from app.dreaming.service import run_dreaming_cycle
-                result = await run_dreaming_cycle(db, days=30, min_actions=3)
-                logger.info(f"Initial dreaming cycle: {result.get('status', 'unknown')}")
+                task = await create_task(
+                    db,
+                    name="Locutus Dreaming Consolidation",
+                    task_type="dreaming",
+                    schedule=cron_expr,
+                    description="Consolidates ActionMemory entries into long-term knowledge",
+                    tags=["dreaming", "self-improvement", "memory-consolidation"],
+                    dreaming_days=14,
+                    dreaming_min_actions=5,
+                )
+                logger.info(f"Dreaming task registered with schedule: {cron_expr}")
         except Exception:
-            pass  # dreaming must never block startup
+            logger.exception("Failed to initialize dreaming task")
 
-    asyncio.create_task(_run_initial_dreaming())
-
-    # Periodic Dreaming consolidation every 6 hours
-    async def _periodic_dreaming():
-        """Run Dreaming consolidation on the configured interval."""
-        interval_seconds = max(60, settings.locutus_dreaming_interval_minutes * 60)
-        while True:
-            await asyncio.sleep(interval_seconds)
-            try:
-                async with AsyncSessionLocal() as db:
-                    from app.dreaming.service import run_dreaming_cycle
-                    result = await run_dreaming_cycle(db, days=14, min_actions=5)
-                    logger.info(f"Periodic dreaming: {result.get('status', 'unknown')}")
-            except Exception:
-                logger.exception("Periodic dreaming failed")
-
-    asyncio.create_task(_periodic_dreaming())
+    asyncio.create_task(_init_dreaming_task())
 
     # Initialize scheduler
     await init_scheduler()
@@ -262,6 +344,7 @@ app.include_router(dreaming_router)
 app.include_router(vault_router)
 app.include_router(discord_locutus_router)
 app.include_router(locutus_router)
+app.include_router(seven_of_nine_router)
 app.include_router(agent_sandbox_router)
 
 

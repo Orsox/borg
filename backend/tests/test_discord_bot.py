@@ -276,11 +276,20 @@ class TestBotConfig:
     def test_validation_missing_token(self):
         """Test: Config ohne Token bei enabled=True gibt Error."""
         from app.discord_bot.config import BotConfig
-        
+
         config = BotConfig(enabled=True, token="")
         errors = config.validate()
         assert len(errors) == 1
         assert "DISCORD_BOT_TOKEN" in errors[0]
+
+    def test_validation_uses_env_prefix(self):
+        """Test: Validation-Errors verwenden das konfigurierte env_prefix (für Persona-Bots)."""
+        from app.discord_bot.config import BotConfig
+
+        config = BotConfig(env_prefix="DISCORD_BOT_SEVEN", enabled=True, token="")
+        errors = config.validate()
+        assert len(errors) == 1
+        assert "DISCORD_BOT_SEVEN_TOKEN" in errors[0]
 
     def test_validation_valid(self):
         """Test: Valid Config gibt leere Errors."""
@@ -295,14 +304,14 @@ class TestBotConfig:
         from app.config import settings
         from app.discord_bot.config import BotConfig
 
-        monkeypatch.setattr(settings, "discord_bot_enabled", True)
-        monkeypatch.setattr(settings, "discord_bot_token", "settings-token")
-        monkeypatch.setattr(settings, "discord_bot_channel_id", 123456)
-        monkeypatch.setattr(settings, "discord_bot_allowed_user_ids", "42, 84")
-        monkeypatch.setattr(settings, "discord_bot_prefix", "?")
-        monkeypatch.setattr(settings, "discord_bot_mention_prefix", "@LocutusTest")
+        monkeypatch.setattr(settings, "discord_bot_locutus_enabled", True)
+        monkeypatch.setattr(settings, "discord_bot_locutus_token", "settings-token")
+        monkeypatch.setattr(settings, "discord_bot_locutus_channel_id", 123456)
+        monkeypatch.setattr(settings, "discord_bot_locutus_allowed_user_ids", "42, 84")
+        monkeypatch.setattr(settings, "discord_bot_locutus_prefix", "?")
+        monkeypatch.setattr(settings, "discord_bot_locutus_mention_prefix", "@LocutusTest")
 
-        config = BotConfig.from_env()
+        config = BotConfig.from_env_locutus()
 
         assert config.enabled is True
         assert config.token == "settings-token"
@@ -311,14 +320,39 @@ class TestBotConfig:
         assert config.prefix == "?"
         assert config.mention_prefix == "@LocutusTest"
 
+    def test_from_env_seven_uses_app_settings(self, monkeypatch):
+        """Test: Seven of Nine lädt ihre eigene Bot-Config aus den DISCORD_BOT_SEVEN_* Settings."""
+        from app.config import settings
+        from app.discord_bot.config import BotConfig
+
+        monkeypatch.setattr(settings, "discord_bot_seven_enabled", True)
+        monkeypatch.setattr(settings, "discord_bot_seven_token", "seven-token")
+        monkeypatch.setattr(settings, "discord_bot_seven_channel_id", 654321)
+        monkeypatch.setattr(settings, "discord_bot_seven_allowed_user_ids", "1, 2")
+        monkeypatch.setattr(settings, "discord_bot_seven_prefix", "!")
+        monkeypatch.setattr(settings, "discord_bot_seven_mention_prefix", "@SevenTest")
+
+        config = BotConfig.from_env_seven()
+
+        assert config.env_prefix == "DISCORD_BOT_SEVEN"
+        assert config.enabled is True
+        assert config.token == "seven-token"
+        assert config.channel_id == 654321
+        assert config.allowed_user_ids == [1, 2]
+        assert config.prefix == "!"
+        assert config.mention_prefix == "@SevenTest"
+
     def test_dreaming_interval_setting_default_and_override(self, monkeypatch):
-        """Test: locutus_dreaming_interval_minutes hat sinnvollen Default und ist via Settings überschreibbar."""
+        """Test: locutus_dreaming_time und locutus_dreaming_frequency haben sinnvolle Defaults und sind via Settings überschreibbar."""
         from app.config import settings
 
-        assert settings.locutus_dreaming_interval_minutes == 360
+        assert settings.locutus_dreaming_time == "03:00"
+        assert settings.locutus_dreaming_frequency == "daily"
 
-        monkeypatch.setattr(settings, "locutus_dreaming_interval_minutes", 30)
-        assert settings.locutus_dreaming_interval_minutes == 30
+        monkeypatch.setattr(settings, "locutus_dreaming_time", "04:00")
+        monkeypatch.setattr(settings, "locutus_dreaming_frequency", "weekly")
+        assert settings.locutus_dreaming_time == "04:00"
+        assert settings.locutus_dreaming_frequency == "weekly"
 
 
 class TestResponse:
@@ -1464,6 +1498,92 @@ class TestServiceChat:
             assert "eigenen Docker zum Bauen von Funktionen" in system_prompt
 
         await service.stop()
+
+
+class TestResolveAddressee:
+    """Tests für DiscordBotService.resolve_addressee() — Namens-Adressierung in geteilten Channels."""
+
+    def _make_service(self):
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+
+        return DiscordBotService(BotConfig(enabled=True, token="test-token"))
+
+    @pytest.mark.asyncio
+    async def test_explicit_name_addresses_persona(self):
+        from app.discord_bot.service import PERSONA_LOCUTUS, PERSONA_SEVEN
+
+        service = self._make_service()
+
+        assert await service.resolve_addressee(1, "Locutus, was ist der Status?") == PERSONA_LOCUTUS
+        assert await service.resolve_addressee(1, "Hallo SevenOfNine bist du da?") == PERSONA_SEVEN
+        assert await service.resolve_addressee(1, "Seven of Nine, analysiere das.") == PERSONA_SEVEN
+
+    @pytest.mark.asyncio
+    async def test_collective_addresses_both(self):
+        from app.discord_bot.service import PERSONA_COLLECTIVE
+
+        service = self._make_service()
+
+        assert await service.resolve_addressee(1, "Collective, was meint ihr?") == PERSONA_COLLECTIVE
+        assert await service.resolve_addressee(1, "Kollektiv, hört zu.") == PERSONA_COLLECTIVE
+
+    @pytest.mark.asyncio
+    async def test_no_name_returns_none_without_prior_session(self):
+        service = self._make_service()
+
+        assert await service.resolve_addressee(1, "Was haltet ihr davon?") is None
+
+    @pytest.mark.asyncio
+    async def test_continuation_keeps_persona_addressed_without_repeating_name(self):
+        from app.discord_bot.service import PERSONA_SEVEN
+
+        service = self._make_service()
+
+        assert await service.resolve_addressee(1, "Seven, schau dir das an.") == PERSONA_SEVEN
+        # Folgenachricht ohne Namen — Seven bleibt "dran"
+        assert await service.resolve_addressee(1, "Und was sagst du zur Architektur?") == PERSONA_SEVEN
+
+    @pytest.mark.asyncio
+    async def test_new_name_switches_active_persona(self):
+        from app.discord_bot.service import PERSONA_LOCUTUS, PERSONA_SEVEN
+
+        service = self._make_service()
+
+        assert await service.resolve_addressee(1, "Seven, was denkst du?") == PERSONA_SEVEN
+        assert await service.resolve_addressee(1, "Locutus, und du?") == PERSONA_LOCUTUS
+        # Folgenachricht ohne Namen geht jetzt an Locutus
+        assert await service.resolve_addressee(1, "Stimmst du ihr zu?") == PERSONA_LOCUTUS
+
+    @pytest.mark.asyncio
+    async def test_session_expires_after_timeout(self, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+
+        from app.discord_bot import service as service_module
+        from app.discord_bot.service import PERSONA_SEVEN
+
+        service = self._make_service()
+
+        assert await service.resolve_addressee(1, "Seven, bist du da?") == PERSONA_SEVEN
+
+        # Letzte Aktivität künstlich > 15 Minuten in die Vergangenheit verschieben
+        persona, _ = service._channel_addressee[1]
+        service._channel_addressee[1] = (persona, datetime.now(timezone.utc) - timedelta(minutes=16))
+
+        assert await service.resolve_addressee(1, "Hallo, jemand da?") is None
+        assert 1 not in service._channel_addressee
+
+    @pytest.mark.asyncio
+    async def test_addressing_is_per_channel(self):
+        from app.discord_bot.service import PERSONA_LOCUTUS, PERSONA_SEVEN
+
+        service = self._make_service()
+
+        assert await service.resolve_addressee(1, "Seven, hier bist du gemeint.") == PERSONA_SEVEN
+        assert await service.resolve_addressee(2, "Locutus, hier du.") == PERSONA_LOCUTUS
+        # Channel 1 bleibt bei Seven, Channel 2 bei Locutus
+        assert await service.resolve_addressee(1, "Und weiter?") == PERSONA_SEVEN
+        assert await service.resolve_addressee(2, "Und weiter?") == PERSONA_LOCUTUS
 
 
 class TestServiceStatus:

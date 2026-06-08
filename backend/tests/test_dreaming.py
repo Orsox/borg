@@ -17,6 +17,7 @@ from app.second_brain.action_models import ActionMemory  # noqa: F401
 from app.second_brain.models import Note  # noqa: F401
 from app.dreaming.models import DreamingRun  # noqa: F401
 from app.dreaming.service import _extract_patterns, run_dreaming_cycle
+from app.task_automation.scheduler import translate_dreaming_config
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -147,3 +148,35 @@ async def test_run_dreaming_cycle_skips_when_insufficient_actions():
         )
 
     assert result["status"] == "skipped"
+
+
+class TestTranslateDreamingConfig:
+    """Tests for the human-friendly dreaming config translator."""
+
+    def test_daily_at_0300(self):
+        """Test: daily at 03:00 -> 0 3 * * *"""
+        assert translate_dreaming_config("03:00", "daily") == "0 3 * * *"
+
+    def test_hourly(self):
+        """Test: hourly -> 0 * * * *"""
+        assert translate_dreaming_config("03:00", "hourly") == "0 * * * *"
+
+    def test_weekly(self):
+        """Test: weekly at 03:00 -> 0 3 * * 0"""
+        assert translate_dreaming_config("03:00", "weekly") == "0 3 * * 0"
+
+    def test_every_6_hours(self):
+        """Test: every_6_hours -> 0 */6 * * *"""
+        assert translate_dreaming_config("03:00", "every_6_hours") == "0 */6 * * *"
+
+    def test_every_12_hours(self):
+        """Test: every_12_hours -> 0 */12 * * *"""
+        assert translate_dreaming_config("03:00", "every_12_hours") == "0 */12 * * *"
+
+    def test_invalid_time_format(self):
+        """Test: invalid time format returns wildcard"""
+        assert translate_dreaming_config("invalid", "daily") == "* * * * *"
+
+    def test_custom_time(self):
+        """Test: daily at 14:30 -> 30 14 * * *"""
+        assert translate_dreaming_config("14:30", "daily") == "30 14 * * *"

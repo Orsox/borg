@@ -1,6 +1,7 @@
 """APScheduler integration for Task Automation."""
 
 import asyncio
+import json
 import logging
 import subprocess
 from datetime import datetime, timezone
@@ -20,6 +21,28 @@ scheduler: AsyncIOScheduler | None = None
 
 # SSE event queue
 sse_queue: asyncio.Queue = asyncio.Queue()
+
+
+def translate_dreaming_config(time_str: str, frequency: str) -> str:
+    """Translates human-friendly config to Cron expression."""
+    try:
+        hour, minute = time_str.split(":")
+        # Remove leading zeros for cron compatibility
+        hour_int = int(hour)
+        minute_int = int(minute)
+        
+        freq_map = {
+            "hourly": f"{minute_int} * * * *",
+            "daily": f"{minute_int} {hour_int} * * *",
+            "weekly": f"{minute_int} {hour_int} * * 0",  # Sunday
+            "every_6_hours": f"{minute_int} */6 * * *",
+            "every_12_hours": f"{minute_int} */12 * * *",
+        }
+        
+        return freq_map.get(frequency, f"{minute_int} {hour_int} * * *")
+    except ValueError:
+        logger.error(f"Invalid time format: {time_str}. Expected HH:MM.")
+        return "* * * * *"
 
 
 async def init_scheduler() -> None:
@@ -42,16 +65,16 @@ async def register_task(task: Task) -> None:
     """Register a task with the scheduler."""
     if not scheduler or not task.is_enabled or not task.schedule:
         return
-    
+
     try:
         # Parse cron expression: "minute hour day month weekday"
         parts = task.schedule.split()
         if len(parts) != 5:
             logger.error(f"Invalid cron expression for task {task.id}: {task.schedule}")
             return
-        
+
         minute, hour, day, month, weekday = parts
-        
+
         scheduler.add_job(
             _execute_task,
             "cron",
@@ -73,7 +96,7 @@ async def remove_task(task_id: int) -> None:
     """Remove a task from the scheduler."""
     if not scheduler:
         return
-    
+
     job_id = f"task_{task_id}"
     try:
         scheduler.remove_job(job_id)
@@ -95,17 +118,17 @@ async def _execute_task(task_id: int) -> None:
         from sqlalchemy import select
         result = await db.execute(select(Task).where(Task.id == task_id))
         task = result.scalar_one_or_none()
-        
+
         if not task:
             logger.error(f"Task {task_id} not found")
             return
-        
+
         # Create run record
         run = TaskRun(task_id=task_id, status="running")
         db.add(run)
         await db.flush()
         await db.refresh(run)
-        
+
         # Notify SSE
         if task.task_type == "heartbeat":
             await sse_queue.put({
@@ -123,10 +146,10 @@ async def _execute_task(task_id: int) -> None:
                 "run_id": run.id,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
-        
+
         try:
             start_time = datetime.now(timezone.utc)
-            
+
             if task.task_type == "shell" and task.command:
                 exit_code, stdout, stderr = await _run_shell_command(
                     task.command, task.timeout
@@ -143,20 +166,24 @@ async def _execute_task(task_id: int) -> None:
                 exit_code, stdout, stderr = await _run_skill_workflow(
                     task.archon_workflow_template, task.id
                 )
+            elif task.task_type == "dreaming":
+                exit_code, stdout, stderr = await _run_dreaming_task(
+                    task.dreaming_days, task.dreaming_min_actions
+                )
             else:
                 exit_code, stdout, stderr = 1, "", "No command or workflow specified"
-            
+
             duration_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
-            
+
             run.finished_at = datetime.now(timezone.utc)
             run.status = "success" if exit_code == 0 else "failed"
             run.exit_code = exit_code
             run.stdout = stdout
             run.stderr = stderr
             run.duration_ms = duration_ms
-            
+
             await db.commit()
-            
+
             # Notify SSE
             if task.task_type == "heartbeat":
                 await sse_queue.put({
@@ -178,14 +205,14 @@ async def _execute_task(task_id: int) -> None:
                     "duration_ms": duration_ms,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
-            
+
         except Exception as e:
             logger.error(f"Task execution error for task {task_id}: {e}")
             run.finished_at = datetime.now(timezone.utc)
             run.status = "failed"
             run.stderr = str(e)
             await db.commit()
-            
+
             await sse_queue.put({
                 "type": "task_run_failed",
                 "task_id": task_id,
@@ -233,18 +260,30 @@ async def _run_skill_workflow(template_name: str, skill_task_id: int) -> tuple[i
     return await _run_shell_command(cmd, timeout=600)
 
 
+async def _run_dreaming_task(days: int = 14, min_actions: int = 5) -> tuple[int, str, str]:
+    """Run the dreaming consolidation cycle."""
+    try:
+        from app.dreaming.service import run_dreaming_cycle
+        async with AsyncSessionLocal() as db:
+            result = await run_dreaming_cycle(db, days=days, min_actions=min_actions)
+        return 0, json.dumps(result), ""
+    except Exception as e:
+        logger.exception("Dreaming task failed")
+        return 1, "", str(e)
+
+
 async def reload_all_tasks() -> None:
     """Reload all enabled tasks from the database into the scheduler."""
     if not scheduler:
         return
-    
+
     async with AsyncSessionLocal() as db:
         from sqlalchemy import select
         result = await db.execute(select(Task).where(Task.is_enabled == True))  # noqa: E712
         tasks = list(result.scalars().all())
-        
+
         for task in tasks:
             if task.schedule:
                 await register_task(task)
-    
+
     logger.info(f"Reloaded {len(tasks)} tasks into scheduler")
