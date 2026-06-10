@@ -1376,7 +1376,9 @@ class TestServiceChat:
             call_args = mock_chat.call_args
             system_prompt = call_args.args[1]
             assert "Locutus" in system_prompt
-            assert "technischer Assistent" in system_prompt
+            # TNG-Lore-Anker: der assimilierte Picard als Sprecher des Kollektivs.
+            assert "Jean-Luc Picard" in system_prompt
+            assert "Sprecher" in system_prompt
             # Bei Unsicherheit über die Nutzerabsicht soll Locutus nachfragen statt
             # zu raten/generisch zu antworten (statt z.B. eine mehrdeutige "was
             # solltest du dir merken"-Frage falsch als neue Merk-Anweisung zu lesen).
