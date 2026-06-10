@@ -246,6 +246,7 @@ async def lifespan(app: FastAPI):
             "ALTER TABLE tasks ADD COLUMN heartbeat_workflow_name VARCHAR(256)",
             "ALTER TABLE tasks ADD COLUMN dreaming_days INTEGER DEFAULT 14",
             "ALTER TABLE tasks ADD COLUMN dreaming_min_actions INTEGER DEFAULT 5",
+            "ALTER TABLE tasks ADD COLUMN dreaming_persona VARCHAR(64)",
         ]:
             try:
                 await conn.execute(text(ddl))
@@ -265,34 +266,66 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass  # log ingestion must never block startup
 
-    # Initialize Dreaming task in the scheduler (replaces old _periodic_dreaming)
-    async def _init_dreaming_task():
-        """Register the Dreaming consolidation task in the scheduler."""
+    # Initialize Dreaming tasks in the scheduler (one per persona)
+    async def _init_dreaming_tasks():
+        """Register one Dreaming consolidation task per configured persona."""
         try:
             from app.task_automation.service import create_task
             from app.task_automation.scheduler import translate_dreaming_config
-            
-            cron_expr = translate_dreaming_config(
-                settings.locutus_dreaming_time,
-                settings.locutus_dreaming_frequency
-            )
-            
-            async with AsyncSessionLocal() as db:
-                task = await create_task(
-                    db,
-                    name="Locutus Dreaming Consolidation",
-                    task_type="dreaming",
-                    schedule=cron_expr,
-                    description="Consolidates ActionMemory entries into long-term knowledge",
-                    tags=["dreaming", "self-improvement", "memory-consolidation"],
-                    dreaming_days=14,
-                    dreaming_min_actions=5,
-                )
-                logger.info(f"Dreaming task registered with schedule: {cron_expr}")
-        except Exception:
-            logger.exception("Failed to initialize dreaming task")
 
-    asyncio.create_task(_init_dreaming_task())
+            # Persona definitions: (config_prefix, persona_key, display_name)
+            personas = [
+                (
+                    "locutus",
+                    "locutus",
+                    "Locutus",
+                    settings.locutus_dreaming_time,
+                    settings.locutus_dreaming_frequency,
+                    settings.locutus_dreaming_days,
+                    settings.locutus_dreaming_min_actions,
+                ),
+                (
+                    "seven",
+                    "seven",
+                    "Seven of Nine",
+                    settings.seven_dreaming_time,
+                    settings.seven_dreaming_frequency,
+                    settings.seven_dreaming_days,
+                    settings.seven_dreaming_min_actions,
+                ),
+            ]
+
+            async with AsyncSessionLocal() as db:
+                for prefix, persona_key, display_name, dream_time, dream_freq, dream_days, dream_min in personas:
+                    cron_expr = translate_dreaming_config(dream_time, dream_freq)
+                    task_name = f"{display_name} Dreaming Consolidation"
+
+                    # Check if task already exists (idempotent)
+                    from sqlalchemy import select
+                    from app.task_automation.models import Task
+                    existing = await db.execute(
+                        select(Task).where(Task.name == task_name, Task.task_type == "dreaming")
+                    )
+                    if existing.scalar_one_or_none():
+                        logger.info(f"Dreaming task '{task_name}' already exists — skipping")
+                        continue
+
+                    task = await create_task(
+                        db,
+                        name=task_name,
+                        task_type="dreaming",
+                        schedule=cron_expr,
+                        description=f"Consolidates ActionMemory entries into long-term knowledge",
+                        tags=["dreaming", "self-improvement", "memory-consolidation"],
+                        dreaming_days=dream_days,
+                        dreaming_min_actions=dream_min,
+                        dreaming_persona=persona_key,
+                    )
+                    logger.info(f"Dreaming task '{task_name}' registered with schedule: {cron_expr}")
+        except Exception:
+            logger.exception("Failed to initialize dreaming tasks")
+
+    asyncio.create_task(_init_dreaming_tasks())
 
     # Initialize scheduler
     await init_scheduler()

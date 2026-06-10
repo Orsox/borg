@@ -39,6 +39,7 @@ async def create_task(
     heartbeat_workflow_name: str | None = None,
     dreaming_days: int = 14,
     dreaming_min_actions: int = 5,
+    dreaming_persona: str | None = None,
     description: str | None = None,
     tags: list[str] | None = None,
     retry_max: int = 0,
@@ -48,7 +49,7 @@ async def create_task(
     """Create a new task and register with scheduler."""
     if tags is None:
         tags = []
-    
+
     task = Task(
         name=name,
         task_type=task_type,
@@ -59,6 +60,7 @@ async def create_task(
         heartbeat_workflow_name=heartbeat_workflow_name,
         dreaming_days=dreaming_days,
         dreaming_min_actions=dreaming_min_actions,
+        dreaming_persona=dreaming_persona,
         description=description,
         tags=_tags_to_json(tags),
         retry_max=retry_max,
@@ -280,7 +282,7 @@ async def _execute_task_now(task_id: int, run_id: int) -> None:
                 )
             elif task.task_type == "dreaming":
                 exit_code, stdout, stderr = await _run_dreaming_task(
-                    task.dreaming_days, task.dreaming_min_actions
+                    task.dreaming_days, task.dreaming_min_actions, task.dreaming_persona
                 )
             else:
                 exit_code, stdout, stderr = 1, "", "No command or workflow specified"

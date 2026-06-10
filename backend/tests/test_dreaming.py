@@ -113,6 +113,7 @@ async def test_run_dreaming_cycle_with_archon_tags_creates_note():
         AsyncSessionLocal(),
         days=14,
         min_actions=1,  # lower threshold for testing
+        persona="locutus",
     )
 
     assert result["status"] == "success"

@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     seven_gitlab_username: str = Field(default="seven-of-nine", description="GitLab-Benutzername für Sevens Konto")
     seven_gitlab_workspace_repo: str = Field(default="workspace", description="Default-Repo für Agent-Mode-Läufe")
 
-    # Locutus Autonomy
+    # Locutus Autonomy — Dreaming
     locutus_dreaming_time: str = Field(
         default="03:00",
         description="Time to run dreaming (HH:MM)",
@@ -62,6 +62,33 @@ class Settings(BaseSettings):
         default="daily",
         description="Frequency of dreaming: 'hourly', 'daily', 'weekly', 'every_6_hours', 'every_12_hours'",
         pattern="^(hourly|daily|weekly|every_6_hours|every_12_hours)$",
+    )
+    locutus_dreaming_days: int = Field(
+        default=14,
+        description="Number of days to look back for ActionMemory entries",
+    )
+    locutus_dreaming_min_actions: int = Field(
+        default=5,
+        description="Minimum ActionMemory entries required to trigger dreaming",
+    )
+
+    # Seven of Nine — Dreaming
+    seven_dreaming_time: str = Field(
+        default="04:00",
+        description="Time to run dreaming (HH:MM)",
+    )
+    seven_dreaming_frequency: str = Field(
+        default="daily",
+        description="Frequency of dreaming: 'hourly', 'daily', 'weekly', 'every_6_hours', 'every_12_hours'",
+        pattern="^(hourly|daily|weekly|every_6_hours|every_12_hours)$",
+    )
+    seven_dreaming_days: int = Field(
+        default=14,
+        description="Number of days to look back for ActionMemory entries",
+    )
+    seven_dreaming_min_actions: int = Field(
+        default=5,
+        description="Minimum ActionMemory entries required to trigger dreaming",
     )
 
     model_config = SettingsConfigDict(

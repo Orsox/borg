@@ -168,7 +168,7 @@ async def _execute_task(task_id: int) -> None:
                 )
             elif task.task_type == "dreaming":
                 exit_code, stdout, stderr = await _run_dreaming_task(
-                    task.dreaming_days, task.dreaming_min_actions
+                    task.dreaming_days, task.dreaming_min_actions, task.dreaming_persona
                 )
             else:
                 exit_code, stdout, stderr = 1, "", "No command or workflow specified"
@@ -260,16 +260,38 @@ async def _run_skill_workflow(template_name: str, skill_task_id: int) -> tuple[i
     return await _run_shell_command(cmd, timeout=600)
 
 
-async def _run_dreaming_task(days: int = 14, min_actions: int = 5) -> tuple[int, str, str]:
-    """Run the dreaming consolidation cycle."""
-    try:
-        from app.dreaming.service import run_dreaming_cycle
-        async with AsyncSessionLocal() as db:
-            result = await run_dreaming_cycle(db, days=days, min_actions=min_actions)
-        return 0, json.dumps(result), ""
-    except Exception as e:
-        logger.exception("Dreaming task failed")
-        return 1, "", str(e)
+async def _run_dreaming_task(
+    days: int = 14,
+    min_actions: int = 5,
+    persona: str | None = None,
+) -> tuple[int, str, str]:
+    """Run the dreaming consolidation cycle with retry on SQLite lock."""
+    import asyncio as _asyncio
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            from app.dreaming.service import run_dreaming_cycle
+            async with AsyncSessionLocal() as db:
+                result = await run_dreaming_cycle(
+                    db, days=days, min_actions=min_actions, persona=persona
+                )
+            return 0, json.dumps(result), ""
+        except Exception as e:
+            err_str = str(e)
+            # Retry on "database is locked" with exponential backoff
+            if "database is locked" in err_str and attempt < max_retries - 1:
+                wait = 2 ** attempt
+                logger.warning(
+                    f"Dreaming task database locked (attempt {attempt+1}/{max_retries}), "
+                    f"retrying in {wait}s"
+                )
+                await _asyncio.sleep(wait)
+            else:
+                logger.exception("Dreaming task failed")
+                return 1, "", err_str
+    # Should not reach here, but just in case
+    return 1, "", "Dreaming task failed after retries"
 
 
 async def reload_all_tasks() -> None:

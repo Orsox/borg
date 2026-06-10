@@ -29,6 +29,7 @@ class Task(Base):
     )  # For heartbeat-type tasks: which workflow to trigger on heartbeat turn
     dreaming_days: Mapped[int] = mapped_column(Integer, default=14, nullable=False)  # For dreaming-type tasks: days to look back
     dreaming_min_actions: Mapped[int] = mapped_column(Integer, default=5, nullable=False)  # For dreaming-type tasks: minimum actions required
+    dreaming_persona: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)  # For dreaming-type tasks: persona key (e.g. 'locutus', 'seven')
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     tags: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     retry_max: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

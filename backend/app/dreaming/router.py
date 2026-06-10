@@ -15,11 +15,12 @@ router = APIRouter(prefix="/api/dreaming", tags=["dreaming"])
 async def trigger_dreaming(
     days: int = Query(default=14, ge=1, le=90),
     min_actions: int = Query(default=5, ge=1),
+    persona: str = Query(default=None, max_length=64),
     db: AsyncSession = Depends(get_session),
     _user=Depends(get_current_user),
 ):
     """Trigger a Dreaming consolidation cycle."""
-    result = await service.run_dreaming_cycle(db, days=days, min_actions=min_actions)
+    result = await service.run_dreaming_cycle(db, days=days, min_actions=min_actions, persona=persona)
     return result
 
 
