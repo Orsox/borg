@@ -14,6 +14,7 @@ import asyncio
 import logging
 import re
 import uuid
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Optional
 
@@ -44,6 +45,15 @@ PERSONA_COLLECTIVE = "collective"
 # Wie lange eine Persona nach der letzten Konversation in einem Channel ohne
 # erneute Namensnennung weiter "dran" bleibt.
 ADDRESS_SESSION_TIMEOUT = timedelta(minutes=15)
+
+# Kurzzeit-Gesprächsgedächtnis pro (Persona, User): die letzten Turns werden
+# bei jedem LLM-Aufruf mitgeschickt, damit Folge-Nachrichten ("Hat es
+# geklappt?", "Das mit dem Repo") einen Bezug haben — ohne Verlauf bestreitet
+# die Persona schlicht, je etwas getan zu haben. Rein in-memory: ein
+# Backend-Neustart beginnt bewusst mit leerem Verlauf (Langzeitwissen läuft
+# über [MEMORY: ...]-Direktiven, nicht hierüber).
+CHAT_HISTORY_MAX_MESSAGES = 12
+CHAT_HISTORY_TIMEOUT = timedelta(minutes=60)
 
 _LOCUTUS_NAME_RE = re.compile(r"\bLocutus\b", re.IGNORECASE)
 # Deckt "Seven", "Seven of Nine" und "SevenOfNine" ab (\s* erlaubt beides).
@@ -249,6 +259,11 @@ class DiscordBotService:
         # Sevens Discord-Channel aus (von main.py auf _seven_bot_client.send_notification
         # verdrahtet — derselbe Mechanismus wie der TaskEventListener für Locutus).
         self._seven_notifier: Optional[Callable[[str], Awaitable[None]]] = None
+        # Kurzzeit-Gesprächsgedächtnis (siehe CHAT_HISTORY_*-Konstanten):
+        # pro (Persona, User) die letzten Turns plus Zeitpunkt der letzten
+        # Aktivität für den Timeout.
+        self._chat_histories: dict[tuple[str, int], deque[dict[str, str]]] = {}
+        self._chat_history_seen: dict[tuple[str, int], datetime] = {}
 
     def set_seven_notifier(self, notifier: Optional[Callable[[str], Awaitable[None]]]) -> None:
         """Registriere den Callback, über den Agent-Mode-Ergebnisse an Sevens Channel gehen."""
@@ -269,6 +284,41 @@ class DiscordBotService:
         if self._seven_llm_client:
             await self._seven_llm_client.stop()
         logger.info("DiscordBotService stopped")
+
+    def _recall_chat_history(self, persona: str, user_id: int) -> list[dict[str, str]]:
+        """Hole den noch frischen Gesprächsverlauf für (Persona, User).
+
+        Abgelaufene Verläufe (> CHAT_HISTORY_TIMEOUT seit der letzten
+        Aktivität) werden dabei verworfen — gleiche Session-Logik wie
+        resolve_addressee, nur mit längerem Fenster.
+        """
+        key = (persona, user_id)
+        last_seen = self._chat_history_seen.get(key)
+        if last_seen and datetime.now(timezone.utc) - last_seen > CHAT_HISTORY_TIMEOUT:
+            self._chat_histories.pop(key, None)
+            self._chat_history_seen.pop(key, None)
+            return []
+        return list(self._chat_histories.get(key, ()))
+
+    def _remember_chat_turn(self, persona: str, user_id: int, user_message: str, assistant_reply: str) -> None:
+        """Hänge einen abgeschlossenen Turn an den Gesprächsverlauf an."""
+        key = (persona, user_id)
+        history = self._chat_histories.setdefault(key, deque(maxlen=CHAT_HISTORY_MAX_MESSAGES))
+        history.append({"role": "user", "content": user_message})
+        history.append({"role": "assistant", "content": assistant_reply})
+        self._chat_history_seen[key] = datetime.now(timezone.utc)
+
+    def _remember_assistant_note(self, persona: str, user_id: int, content: str) -> None:
+        """Hänge eine Assistant-Nachricht ohne User-Turn an den Verlauf an.
+
+        Für asynchron eintreffende Ergebnisse (Agent-Mode-Notifications): die
+        Persona soll sich an ihren eigenen Abschlussbericht erinnern, obwohl
+        keine User-Nachricht dazwischen lag.
+        """
+        key = (persona, user_id)
+        history = self._chat_histories.setdefault(key, deque(maxlen=CHAT_HISTORY_MAX_MESSAGES))
+        history.append({"role": "assistant", "content": content})
+        self._chat_history_seen[key] = datetime.now(timezone.utc)
 
     async def chat(self, message: str, user_id: int) -> Response:
         """
@@ -294,7 +344,7 @@ class DiscordBotService:
                     f"(nutze sie, wenn relevant):\n{lines}"
                 )
 
-            messages = [{"role": "user", "content": message}]
+            messages = [*self._recall_chat_history(PERSONA_LOCUTUS, user_id), {"role": "user", "content": message}]
             answer = await self._llm_client.chat(messages, system_prompt)
 
             directive = _MEMORY_DIRECTIVE_RE.match(answer)
@@ -305,8 +355,11 @@ class DiscordBotService:
                     entry = await locutus_service.create_character_memory(
                         db, title=_memory_title(fact), content=fact, category="user-instruction"
                     )
-                return Response(content=reply or f"✅ Gemerkt: {entry.title}")
+                content = reply or f"✅ Gemerkt: {entry.title}"
+                self._remember_chat_turn(PERSONA_LOCUTUS, user_id, message, content)
+                return Response(content=content)
 
+            self._remember_chat_turn(PERSONA_LOCUTUS, user_id, message, answer)
             return Response(content=answer)
 
         except LlmError as e:
@@ -387,7 +440,7 @@ class DiscordBotService:
                     f"oder es relevant ist, kannst du darauf eingehen:\n{digest}"
                 )
 
-            messages = [{"role": "user", "content": message}]
+            messages = [*self._recall_chat_history(PERSONA_SEVEN, user_id), {"role": "user", "content": message}]
             answer = await self._seven_llm_client.chat(messages, system_prompt)
 
             directive = _MEMORY_DIRECTIVE_RE.match(answer)
@@ -398,7 +451,9 @@ class DiscordBotService:
                     entry = await seven_service.create_memory(
                         db, title=_memory_title(fact), content=fact, category="user-instruction"
                     )
-                return Response(content=reply or f"Daten assimiliert: {entry.title}")
+                content = reply or f"Daten assimiliert: {entry.title}"
+                self._remember_chat_turn(PERSONA_SEVEN, user_id, message, content)
+                return Response(content=content)
 
             agent_directive = _AGENT_DIRECTIVE_RE.match(answer)
             if agent_directive:
@@ -406,21 +461,30 @@ class DiscordBotService:
                 reply = agent_directive.group(2).strip()
                 if task_description:
                     run_id = self._schedule_agent_run(task_description, user_id)
-                    return Response(
-                        content=reply
-                        or (
-                            f"Auftrag angenommen (Run `{run_id}`). Ich initiiere den Vorgang im "
-                            "Sandbox — Ergebnis folgt, sobald die Analyse abgeschlossen ist."
-                        )
+                    content = reply or (
+                        f"Auftrag angenommen (Run `{run_id}`). Ich initiiere den Vorgang im "
+                        "Sandbox — Ergebnis folgt, sobald die Analyse abgeschlossen ist."
                     )
+                    # Im Verlauf steht zusätzlich der gestartete Auftrag, damit
+                    # "hat es geklappt?"-Nachfragen einen Bezugspunkt haben,
+                    # auch wenn die Bestätigung selbst keine run_id nennt.
+                    self._remember_chat_turn(
+                        PERSONA_SEVEN, user_id, message,
+                        f"{content}\n(Gestarteter Agent-Mode-Lauf `{run_id}`: {task_description})",
+                    )
+                    return Response(content=content)
 
             gitlab_repo_directive = _GITLAB_REPO_DIRECTIVE_RE.match(answer)
             if gitlab_repo_directive:
                 repo_name = gitlab_repo_directive.group(1).strip()
                 reply = gitlab_repo_directive.group(2).strip()
                 if repo_name:
-                    return await self._create_seven_gitlab_repo(repo_name, reply)
+                    response = await self._create_seven_gitlab_repo(repo_name, reply)
+                    if not response.is_error:
+                        self._remember_chat_turn(PERSONA_SEVEN, user_id, message, response.content)
+                    return response
 
+            self._remember_chat_turn(PERSONA_SEVEN, user_id, message, answer)
             return Response(content=answer)
 
         except LlmError as e:
@@ -468,7 +532,11 @@ class DiscordBotService:
                     payload_summary=f"created — {web_url}",
                     result="ok",
                 )
-            return Response(content=reply or f"Repository `{repo_name}` angelegt: {web_url}")
+            # Die URL immer anhängen — auch wenn das Modell eine eigene
+            # Bestätigung formuliert hat: "Bericht folgt nach Bestätigung"
+            # ohne URL liest sich sonst wie ein noch offener Vorgang.
+            confirmation = f"Repository `{repo_name}` angelegt: {web_url}"
+            return Response(content=f"{reply}\n\n{confirmation}" if reply else confirmation)
         except Exception as e:
             logger.error(f"GitLab repo creation failed for '{repo_name}': {e}", exc_info=True)
             async with AsyncSessionLocal() as db:
@@ -512,12 +580,12 @@ class DiscordBotService:
 
         run_id = self._schedule_agent_run(task_description, user_id)
 
-        return Response(
-            content=(
-                f"Auftrag angenommen (Run `{run_id}`). Ich initiiere den Vorgang im Sandbox — "
-                "Ergebnis folgt, sobald die Analyse abgeschlossen ist."
-            )
+        content = (
+            f"Auftrag angenommen (Run `{run_id}`). Ich initiiere den Vorgang im Sandbox — "
+            "Ergebnis folgt, sobald die Analyse abgeschlossen ist."
         )
+        self._remember_chat_turn(PERSONA_SEVEN, user_id, f"!agent {task_description}", content)
+        return Response(content=content)
 
     async def _execute_agent_task(self, run_id: str, task_description: str, user_id: int) -> None:
         """Führe einen Agent-Mode-Lauf aus und melde das übersetzte Ergebnis zurück."""
@@ -536,6 +604,11 @@ class DiscordBotService:
         except Exception as e:
             logger.error(f"Agent Mode run {run_id} failed: {e}", exc_info=True)
             translated = f"Auftrag fehlgeschlagen (Run `{run_id}`) — {e}"
+
+        # In den Gesprächsverlauf, bevor es an den Channel geht: Seven soll
+        # sich an ihren eigenen Abschlussbericht erinnern, wenn Orsox danach
+        # fragt ("hat es geklappt?").
+        self._remember_assistant_note(PERSONA_SEVEN, user_id, translated)
 
         if self._seven_notifier:
             await self._seven_notifier(translated)

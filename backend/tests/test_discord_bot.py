@@ -1703,3 +1703,109 @@ class TestServiceStatus:
         assert "Tasks aktiv: 0" in response.content
         assert "Runs aktiv: 0" in response.content
         assert "Archon: online" in response.content
+
+
+class TestChatHistory:
+    """Tests für das Kurzzeit-Gesprächsgedächtnis (CHAT_HISTORY_*).
+
+    Ohne Verlauf bestreitet eine Persona zwei Nachrichten später, je etwas
+    getan zu haben ("Keine vorherige Aktion wurde in diesem Kontext
+    initiiert") — Folge-Nachrichten wie "Hat es geklappt?" brauchen die
+    vorherigen Turns im messages-Array.
+    """
+
+    def _make_service(self):
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+
+        config = BotConfig(enabled=True, token="test-token")
+        return DiscordBotService(config)
+
+    @pytest.mark.asyncio
+    async def test_seven_recalls_previous_turns(self):
+        from unittest.mock import AsyncMock
+
+        service = self._make_service()
+        mock_llm = AsyncMock()
+        mock_llm.chat = AsyncMock(side_effect=["Antwort eins.", "Antwort zwei."])
+        service._seven_llm_client = mock_llm
+
+        await service.chat_as_seven("Erste Nachricht", user_id=7)
+        await service.chat_as_seven("Hat es geklappt?", user_id=7)
+
+        messages = mock_llm.chat.call_args.args[0]
+        assert messages == [
+            {"role": "user", "content": "Erste Nachricht"},
+            {"role": "assistant", "content": "Antwort eins."},
+            {"role": "user", "content": "Hat es geklappt?"},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_history_is_separate_per_user_and_persona(self):
+        from unittest.mock import AsyncMock
+
+        service = self._make_service()
+        mock_seven = AsyncMock()
+        mock_seven.chat = AsyncMock(return_value="Seven antwortet.")
+        service._seven_llm_client = mock_seven
+        mock_locutus = AsyncMock()
+        mock_locutus.chat = AsyncMock(return_value="Locutus antwortet.")
+        service._llm_client = mock_locutus
+
+        await service.chat_as_seven("Nachricht von User 7", user_id=7)
+
+        # Anderer User: kein fremder Verlauf
+        await service.chat_as_seven("Nachricht von User 8", user_id=8)
+        assert mock_seven.chat.call_args.args[0] == [
+            {"role": "user", "content": "Nachricht von User 8"}
+        ]
+
+        # Andere Persona, gleicher User: ebenfalls eigener Verlauf
+        await service.chat("Nachricht an Locutus", user_id=7)
+        assert mock_locutus.chat.call_args.args[0] == [
+            {"role": "user", "content": "Nachricht an Locutus"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_history_expires_after_timeout(self):
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import AsyncMock
+
+        from app.discord_bot.service import CHAT_HISTORY_TIMEOUT, PERSONA_SEVEN
+
+        service = self._make_service()
+        mock_llm = AsyncMock()
+        mock_llm.chat = AsyncMock(side_effect=["Antwort eins.", "Antwort zwei."])
+        service._seven_llm_client = mock_llm
+
+        await service.chat_as_seven("Erste Nachricht", user_id=7)
+        service._chat_history_seen[(PERSONA_SEVEN, 7)] = (
+            datetime.now(timezone.utc) - CHAT_HISTORY_TIMEOUT - timedelta(minutes=1)
+        )
+        await service.chat_as_seven("Späte Nachfrage", user_id=7)
+
+        assert mock_llm.chat.call_args.args[0] == [
+            {"role": "user", "content": "Späte Nachfrage"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_agent_result_note_is_recalled_in_next_message(self):
+        from unittest.mock import AsyncMock
+
+        from app.discord_bot.service import PERSONA_SEVEN
+
+        service = self._make_service()
+        mock_llm = AsyncMock()
+        mock_llm.chat = AsyncMock(return_value="Der Lauf war erfolgreich.")
+        service._seven_llm_client = mock_llm
+
+        # Asynchron eingetroffener Abschlussbericht (siehe _execute_agent_task)
+        service._remember_assistant_note(
+            PERSONA_SEVEN, 7, "Auftrag abgeschlossen: Branch agent-mode/x gepusht."
+        )
+        await service.chat_as_seven("Hat es geklappt?", user_id=7)
+
+        assert mock_llm.chat.call_args.args[0] == [
+            {"role": "assistant", "content": "Auftrag abgeschlossen: Branch agent-mode/x gepusht."},
+            {"role": "user", "content": "Hat es geklappt?"},
+        ]

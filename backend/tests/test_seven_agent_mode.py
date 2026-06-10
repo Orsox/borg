@@ -791,7 +791,12 @@ class TestGitlabRepoDirective:
             )
 
         assert not response.is_error
-        assert response.content == "Verstanden, ich lege das Repository an."
+        # Die Bestätigung des Modells bleibt, die URL wird immer angehängt —
+        # ohne sie liest sich die Antwort wie ein noch offener Vorgang.
+        assert response.content == (
+            "Verstanden, ich lege das Repository an.\n\n"
+            "Repository `hello-world` angelegt: http://gitlab/seven-of-nine/hello-world"
+        )
         assert "[GITLAB_REPO:" not in response.content
         mock_create.assert_called_once_with("hello-world")
 
