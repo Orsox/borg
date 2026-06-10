@@ -37,6 +37,12 @@ services:
       # ones). Deliberate, scoped trade-off, same spirit as the `--network`
       # deviation documented in agent_sandbox/Dockerfile.pi.
       - /var/run/docker.sock:/var/run/docker.sock
+      # Docker-outside-of-Docker corollary: every `-v` path the backend passes
+      # to `docker run` is resolved by the HOST daemon, not inside this
+      # container. The sandbox staging dir therefore has to be the same path
+      # on both sides — without this mount the sibling container gets an
+      # empty, dockerd-created directory instead of the prepared clone.
+      - /tmp/borg-agent-sandbox:/tmp/borg-agent-sandbox
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]

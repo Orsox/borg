@@ -102,53 +102,46 @@ class TestAgentCommandParsing:
 # --- build_pi_docker_run_argv ---
 
 
-def test_build_pi_docker_run_argv_uses_lmstudio_network_and_passes_llm_config():
-    from pathlib import Path as P
-    import tempfile
+def test_build_pi_docker_run_argv_uses_lmstudio_network_and_passes_llm_config(tmp_path):
+    pi_home = tmp_path / "pi-home"
+    (pi_home / ".pi" / "agent").mkdir(parents=True)
+    (pi_home / ".pi" / "agent" / "models.json").write_text('{"providers":{}}')
 
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-        f.write(b'{"providers":{}}')
-        models_path = P(f.name)
+    argv = sandbox_service.build_pi_docker_run_argv(
+        container_name="borg-agent-run-test",
+        worktree_path=Path("/tmp/borg-agent-sandbox/test"),
+        task="list files",
+        llm_base_url="http://lm8000:1234/v1",
+        model_id="qwen-test",
+        pi_home_path=pi_home,
+    )
 
-    try:
-        argv = sandbox_service.build_pi_docker_run_argv(
-            container_name="borg-agent-run-test",
-            worktree_path=Path("/tmp/borg-agent-sandbox/test"),
-            task="list files",
-            llm_base_url="http://lm8000:1234/v1",
-            model_id="qwen-test",
-            models_json_path=models_path,
-        )
+    assert argv[:3] == ["docker", "run", "--rm"]
+    # Deliberate deviation: NOT --network=none — pi needs to reach the LLM backend
+    assert "--network=none" not in argv
+    network_index = argv.index("--network") + 1
+    assert argv[network_index] == sandbox_service.LMSTUDIO_NETWORK
 
-        assert argv[:3] == ["docker", "run", "--rm"]
-        # Deliberate deviation: NOT --network=none — pi needs to reach the LLM backend
-        assert "--network=none" not in argv
-        network_index = argv.index("--network") + 1
-        assert argv[network_index] == sandbox_service.LMSTUDIO_NETWORK
+    # rest of the lockdown stays intact
+    assert "--cap-drop=ALL" in argv
+    assert "--read-only" in argv
+    assert "--security-opt=no-new-privileges" in argv
+    assert "--user" in argv
 
-        # rest of the lockdown stays intact
-        assert "--cap-drop=ALL" in argv
-        assert "--read-only" in argv
-        assert "--security-opt=no-new-privileges" in argv
-        assert "--user" in argv
+    assert "-e" in argv
+    assert "HOME=/tmp/pi-home" in argv
 
-        assert "-e" in argv
-        assert "HOME=/tmp/pi-home" in argv
+    # the prepared pi home (provider config + writable session dir) is mounted
+    assert f"{pi_home}:/tmp/pi-home:rw" in argv
 
-        # models.json is mounted read-only
-        models_mount = f"{models_path}:/tmp/pi-home/.pi/agent/models.json:ro"
-        assert models_mount in argv
+    # workspace mount is still present
+    assert "/tmp/borg-agent-sandbox/test:/workspace:rw" in argv
 
-        # workspace mount is still present
-        assert "/tmp/borg-agent-sandbox/test:/workspace:rw" in argv
-
-        # pi run command with lm-studio provider
-        assert "--provider" in argv
-        assert "lm-studio" in argv
-        assert "--model" in argv
-        assert "qwen-test" in argv
-    finally:
-        models_path.unlink(missing_ok=True)
+    # pi run command with lm-studio provider
+    assert "--provider" in argv
+    assert "lm-studio" in argv
+    assert "--model" in argv
+    assert "qwen-test" in argv
 
 
 # --- run_agent_mode_task: deny-list rejection (no container should ever run) ---
@@ -206,7 +199,7 @@ def _patch_sandbox_run(monkeypatch, tmp_path, *, exit_code, stdout, stderr, diff
         calls["docker_argvs"].append(argv)
         return exit_code, stdout, stderr
 
-    async def _fake_capture_diff(path):
+    async def _fake_capture_diff(path, base_ref="HEAD"):
         return diff
 
     async def _fake_commit_and_push(path, branch, run_id, task_description):
@@ -215,6 +208,10 @@ def _patch_sandbox_run(monkeypatch, tmp_path, *, exit_code, stdout, stderr, diff
             return True, compare_url or f"http://gitlab/seven-of-nine/workspace/-/compare/main...{branch}"
         return False, "nothing to push"
 
+    # run_agent_mode_task writes/cleans <run_id>.models.json under
+    # SANDBOX_BASE_DIR; the mocked clone skips the mkdir that normally
+    # guarantees it exists, so point it at the test's tmp dir.
+    monkeypatch.setattr(sandbox_service, "SANDBOX_BASE_DIR", tmp_path)
     monkeypatch.setattr(sandbox_service, "_clone_seven_repo", _fake_clone_seven_repo)
     monkeypatch.setattr(sandbox_service, "_cleanup_clone", _fake_cleanup_clone)
     monkeypatch.setattr(sandbox_service, "_run_subprocess", _fake_run_subprocess)
@@ -251,11 +248,13 @@ async def test_run_agent_mode_task_runs_in_sandbox_and_pushes_changes(monkeypatc
     assert result["pushed"] is True
     assert result["compare_url"] and "compare" in result["compare_url"]
 
-    assert len(calls["docker_argvs"]) == 1
-    argv = calls["docker_argvs"][0]
-    assert argv[0] == "docker"
+    docker_argvs = [a for a in calls["docker_argvs"] if a[0] == "docker"]
+    assert len(docker_argvs) == 1
+    argv = docker_argvs[0]
     assert "--network=none" not in argv
     assert f"{clone_path}:/workspace:rw" in argv
+    # untracked files get staged before the diff is captured
+    assert ["git", "-C", str(clone_path), "add", "-A"] in calls["docker_argvs"]
 
     # commit+push only happens for a successful run with a non-empty diff
     assert calls["commit_and_push"] == [(clone_path, branch, run_id, "list the files in app/seven_of_nine")]

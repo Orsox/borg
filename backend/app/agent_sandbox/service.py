@@ -43,6 +43,20 @@ PI_SANDBOX_IMAGE = "borg-agent-sandbox-pi:latest"
 LMSTUDIO_NETWORK = "lmstudio-docker_default"
 _PI_RUN_TIMEOUT = 600
 
+# Prepended to every Agent Mode task so pi knows the sandbox contract. Without
+# it, tasks phrased like "... und pushe den Code" make pi attempt `git push`
+# against a remote it can, by design, never reach (the sandbox network only
+# routes to the LLM hosts) — and it then reports the run as failed even though
+# its actual work succeeded.
+_PI_TASK_PREAMBLE = (
+    "You are working in /workspace, an already-cloned git repository on a "
+    "dedicated branch. You have no network access to any git remote — never "
+    "run `git push` or `git fetch`; they cannot succeed here. Just make and "
+    "test your changes (committing locally is optional); the surrounding "
+    "pipeline commits and pushes your work automatically after you finish.\n\n"
+    "Task: "
+)
+
 _OUTPUT_TRUNCATE_LIMIT = 4000
 
 
@@ -162,9 +176,16 @@ async def _remove_worktree(worktree_path: Path, branch: str) -> None:
         logger.warning(f"Failed to remove sandbox branch {branch}: {stderr.strip()}")
 
 
-async def _capture_diff(worktree_path: Path) -> str:
-    """Capture the diff produced by the skill run inside its worktree."""
-    _, stdout, _ = await _run_subprocess(["git", "diff", "HEAD"], cwd=worktree_path)
+async def _capture_diff(worktree_path: Path, base_ref: str = "HEAD") -> str:
+    """Capture the diff produced by the run inside its worktree.
+
+    `base_ref` matters for Agent Mode: `pi` sometimes commits its own work
+    (tasks phrased as "... und committe den Code" make it run `git commit`
+    itself), which moves HEAD and makes a plain `git diff HEAD` report a clean
+    tree. Diffing against the SHA recorded right after the clone sees the
+    change regardless of whether it's still uncommitted or already committed.
+    """
+    _, stdout, _ = await _run_subprocess(["git", "diff", base_ref], cwd=worktree_path)
     return stdout
 
 
@@ -230,6 +251,22 @@ async def _clone_seven_repo(run_id: str, repo: str) -> tuple[Path, str]:
         raise RuntimeError(f"Failed to create branch {branch}: {checkout_stderr.strip()}")
     agent_logger.info(f"[clone] Branch {branch} created")
 
+    # Local-only ignores for junk the run itself generates (pi usually
+    # executes the code it writes, leaving __pycache__ etc. behind). Lives in
+    # .git/info/exclude, so it applies to the pipeline's `git add -A` and to
+    # any `git commit` pi runs inside the sandbox — the mounted clone shares
+    # its .git — without ever being committed to the repo.
+    exclude_file = clone_path / ".git" / "info" / "exclude"
+    exclude_file.write_text("__pycache__/\n*.pyc\n.pytest_cache/\n.venv/\nnode_modules/\n")
+
+    # The backend runs as root, the sandbox as --user 1000:1000. chmod (not
+    # chown) so pi can write the worktree while .git stays root-owned — a
+    # chown'd repo would trip git's "dubious ownership" check for the
+    # backend's own diff/commit/push commands afterwards.
+    exit_code, _, chmod_stderr = await _run_subprocess(["chmod", "-R", "a+rwX", str(clone_path)])
+    if exit_code != 0:
+        agent_logger.warning(f"[clone] chmod failed: {chmod_stderr.strip()}")
+
     return clone_path, branch
 
 
@@ -257,18 +294,25 @@ async def _commit_and_push(clone_path: Path, branch: str, run_id: str, task_desc
         agent_logger.error(f"[commit] git add failed: exit_code={exit_code} stderr={add_stderr.strip()}")
         return False, f"git add failed: {add_stderr.strip()}"
 
-    commit_message = f"Agent Mode {run_id}: {task_description[:72]}"
-    agent_logger.info(f"[commit] git commit -m \"{commit_message}\"")
-    exit_code, _, commit_stderr = await _run_subprocess([
-        "git", "-C", str(clone_path),
-        "-c", "user.name=Seven of Nine",
-        "-c", "user.email=seven-of-nine@borgos.local",
-        "commit", "-m", commit_message,
-    ])
-    if exit_code != 0:
-        agent_logger.error(f"[commit] git commit failed: exit_code={exit_code} stderr={commit_stderr.strip()}")
-        return False, f"git commit failed: {commit_stderr.strip()}"
-    agent_logger.info(f"[commit] Commit successful")
+    # `pi` may already have committed its work itself (see _capture_diff) —
+    # then the tree is clean, there's nothing left to commit, and the only
+    # remaining step is pushing pi's existing commits.
+    _, status_out, _ = await _run_subprocess(["git", "-C", str(clone_path), "status", "--porcelain"])
+    if not status_out.strip():
+        agent_logger.info(f"[commit] Working tree clean — pi committed its changes itself, pushing as-is")
+    else:
+        commit_message = f"Agent Mode {run_id}: {task_description[:72]}"
+        agent_logger.info(f"[commit] git commit -m \"{commit_message}\"")
+        exit_code, _, commit_stderr = await _run_subprocess([
+            "git", "-C", str(clone_path),
+            "-c", "user.name=Seven of Nine",
+            "-c", "user.email=seven-of-nine@borgos.local",
+            "commit", "-m", commit_message,
+        ])
+        if exit_code != 0:
+            agent_logger.error(f"[commit] git commit failed: exit_code={exit_code} stderr={commit_stderr.strip()}")
+            return False, f"git commit failed: {commit_stderr.strip()}"
+        agent_logger.info(f"[commit] Commit successful")
 
     agent_logger.info(f"[push] git push -u origin {branch}")
     exit_code, _, push_stderr = await _run_subprocess([
@@ -399,7 +443,7 @@ def build_pi_docker_run_argv(
     task: str,
     llm_base_url: str,
     model_id: str,
-    models_json_path: Path | None = None,
+    pi_home_path: Path | None = None,
     image: str = PI_SANDBOX_IMAGE,
 ) -> list[str]:
     """Construct the `docker run` invocation for one Seven of Nine Agent Mode run.
@@ -423,9 +467,14 @@ def build_pi_docker_run_argv(
        anything task-related. `/tmp` is the one writable path already mounted
        (`--tmpfs`), so pointing `$HOME` there needs no extra mount.
 
-    If `models_json_path` is provided, it is mounted read-only at
-    `/tmp/pi-home/.pi/agent/models.json` so pi discovers the "lm-studio"
-    provider configuration on startup.
+    If `pi_home_path` is provided, that pre-built directory (containing
+    `.pi/agent/models.json`, see run_agent_mode_task) is mounted read-write at
+    `/tmp/pi-home` so pi discovers the "lm-studio" provider configuration on
+    startup. The whole directory is mounted — not just models.json — because a
+    single-file mount makes dockerd auto-create the missing parent dirs
+    root-owned, and pi (uid 1000) then can't mkdir its `sessions/` dir beside
+    the config (confirmed empirically: EACCES on
+    `/tmp/pi-home/.pi/agent/sessions/...`).
     """
     argv = [
         "docker", "run", "--rm",
@@ -444,9 +493,10 @@ def build_pi_docker_run_argv(
         "-e", "HOME=/tmp/pi-home",
     ]
 
-    # Mount models.json if provided (lm-studio provider config for pi)
-    if models_json_path:
-        argv.extend(["-v", f"{models_json_path}:/tmp/pi-home/.pi/agent/models.json:ro"])
+    # Mount the prepared pi home if provided (lm-studio provider config +
+    # writable session-state area for pi)
+    if pi_home_path:
+        argv.extend(["-v", f"{pi_home_path}:/tmp/pi-home:rw"])
 
     argv.extend([image, "pi", "run", "--provider", "lm-studio", "--model", model_id, task])
     return argv
@@ -493,11 +543,21 @@ async def run_agent_mode_task(
     try:
         agent_logger.info(f"[run] Clone ready at {clone_path}, branch {branch}")
 
-        # Write lm-studio provider config to a temporary models.json so pi
-        # discovers the provider on startup. pi loads custom providers from
-        # $HOME/.pi/agent/models.json — we mount this file read-only into the
-        # container at the expected path.
-        models_json = clone_path / ".pi-models.json"
+        # Remember where the clone started so the diff survives pi committing
+        # its own work (see _capture_diff).
+        _, base_sha_out, _ = await _run_subprocess(["git", "-C", str(clone_path), "rev-parse", "HEAD"])
+        base_sha = base_sha_out.strip()
+
+        # Build a throwaway $HOME for pi with the lm-studio provider config at
+        # $HOME/.pi/agent/models.json, where pi looks for custom providers on
+        # startup. Lives next to the clone, not inside it, so the later
+        # `git add -A` can't sweep it into the commit. The whole tree is
+        # mounted at /tmp/pi-home (see build_pi_docker_run_argv for why a
+        # directory, not a file mount) and must be writable by uid 1000 —
+        # pi persists session state under $HOME/.pi/agent/sessions/.
+        pi_home = SANDBOX_BASE_DIR / f"{run_id}.pi-home"
+        models_json = pi_home / ".pi" / "agent" / "models.json"
+        models_json.parent.mkdir(parents=True, exist_ok=True)
         models_json.write_text(
             f"""{{
     "providers": {{
@@ -515,15 +575,18 @@ async def run_agent_mode_task(
 }}"""
         )
         agent_logger.info(f"[run] Wrote models.json to {models_json}")
+        exit_code, _, chmod_stderr = await _run_subprocess(["chmod", "-R", "a+rwX", str(pi_home)])
+        if exit_code != 0:
+            agent_logger.warning(f"[run] chmod of pi home failed: {chmod_stderr.strip()}")
 
         container_name = f"borg-agent-run-{run_id}"
         argv = build_pi_docker_run_argv(
             container_name=container_name,
             worktree_path=clone_path,
-            task=task_description,
+            task=_PI_TASK_PREAMBLE + task_description,
             llm_base_url=llm_base_url,
             model_id=model_id,
-            models_json_path=models_json,
+            pi_home_path=pi_home,
         )
         agent_logger.info(f"[run] Docker command: {' '.join(argv[:10])}...")
         agent_logger.info(f"[run] Waiting up to {_PI_RUN_TIMEOUT}s for container output")
@@ -536,7 +599,11 @@ async def run_agent_mode_task(
         else:
             agent_logger.info(f"[run] Container exited successfully (code 0)")
 
-        diff = await _capture_diff(clone_path)
+        # Stage everything before diffing — `git diff` alone is blind to
+        # untracked files, and "create a new script" tasks would otherwise
+        # report "no changes" and never push.
+        await _run_subprocess(["git", "-C", str(clone_path), "add", "-A"])
+        diff = await _capture_diff(clone_path, base_sha)
         if diff.strip():
             agent_logger.info(f"[run] Diff produced: {len(diff)} bytes")
         else:
@@ -594,3 +661,4 @@ async def run_agent_mode_task(
         }
     finally:
         await _cleanup_clone(clone_path)
+        shutil.rmtree(SANDBOX_BASE_DIR / f"{run_id}.pi-home", ignore_errors=True)
