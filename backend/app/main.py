@@ -133,17 +133,6 @@ async def _init_discord_bot() -> None:
                 chat_fn=_bot_service.chat,
             )
 
-            # SSE-Listener initialisieren — sendet Task-Notifications an Locutus' Channel
-            async def notification_callback(content: str) -> None:
-                """Callback für Task-Notifications."""
-                if _bot_client and _bot_client.is_ready():
-                    await _bot_client.send_notification(content)
-                else:
-                    logger.info(f"Notification (bot not ready): {content}")
-
-            _sse_listener = TaskEventListener(notification_callback)
-            await _sse_listener.start()
-
             _bot_task = await _connect_persona_bot(_bot_client, locutus_config, "Locutus", "locutus-bot")
         else:
             logger.info("Locutus bot disabled (DISCORD_BOT_LOCUTUS_ENABLED=false)")
@@ -173,6 +162,32 @@ async def _init_discord_bot() -> None:
             )
         else:
             logger.info("Seven of Nine bot disabled (DISCORD_BOT_SEVEN_ENABLED=false)")
+
+        # Persona-zu-Persona-Dialog: Nur wenn beide Bots laufen, akzeptieren
+        # sie gegenseitig ihre Nachrichten (Namens-Adressierung + Turn-Budget,
+        # siehe BotClient.on_message). Alle anderen Bots bleiben ignoriert.
+        if _bot_client and _seven_bot_client:
+            _bot_client.set_peer(_seven_bot_client)
+            _seven_bot_client.set_peer(_bot_client)
+            logger.info("Persona peer link established: Locutus ↔ Seven of Nine")
+
+        # SSE-Listener: Task-/Dreaming-Notifications gehen an den Bot der
+        # Persona, in deren Namen das Event läuft (z.B. Sevens Dreaming-Zyklus
+        # meldet Seven selbst). Ohne Persona — oder wenn deren Bot nicht
+        # läuft — übernimmt der jeweils andere Bot als Relay.
+        async def notification_callback(content: str, persona: Optional[str] = None) -> None:
+            """Callback für Task-Notifications — Routing nach Persona."""
+            primary = _seven_bot_client if persona == PERSONA_SEVEN else _bot_client
+            fallback = _bot_client if primary is _seven_bot_client else _seven_bot_client
+            if primary and primary.is_ready():
+                await primary.send_notification(content)
+            elif fallback and fallback.is_ready():
+                await fallback.send_notification(content)
+            else:
+                logger.info(f"Notification (no bot ready): {content}")
+
+        _sse_listener = TaskEventListener(notification_callback)
+        await _sse_listener.start()
     except Exception as e:
         logger.error(f"Failed to initialize Discord Bot: {e}")
 

@@ -30,7 +30,9 @@ logger = logging.getLogger(__name__)
 # Wir schneiden bei Bedarf ab und fügen ein Truncation-Hinweis hinzu.
 DISCORD_MAX_LENGTH = 1950
 
-ChatFn = Callable[[str, int], Awaitable[Response]]
+# Signatur: (text, user_id, from_peer=...) — siehe DiscordBotService.chat /
+# chat_as_seven. from_peer markiert Persona-zu-Persona-Nachrichten.
+ChatFn = Callable[..., Awaitable[Response]]
 
 
 class BotClient(commands.Bot):
@@ -89,6 +91,19 @@ class BotClient(commands.Bot):
         self._handler = CommandHandler(service=service, persona_key=persona_key)
         self._channel: Optional[discord.TextChannel] = None
         self._ready_event: asyncio.Event = asyncio.Event()
+        # Die andere Persona desselben BorgOS-Backends (Locutus ↔ Seven of
+        # Nine). Nur deren Bot-Nachrichten werden als Gesprächspartner
+        # akzeptiert — alle anderen Bots bleiben ignoriert (siehe on_message).
+        self._peer: Optional[BotClient] = None
+
+    def set_peer(self, peer: BotClient) -> None:
+        """Registriere die andere Persona für Persona-zu-Persona-Dialoge."""
+        self._peer = peer
+
+    def _is_peer_message(self, message: discord.Message) -> bool:
+        """Stammt die Nachricht vom Bot-Account der anderen Persona?"""
+        peer = self._peer
+        return bool(peer and peer.user and message.author.id == peer.user.id)
 
     @staticmethod
     def _prefix_resolver(bot: commands.Bot, message: discord.Message) -> Optional[str]:
@@ -149,16 +164,46 @@ class BotClient(commands.Bot):
         """
         Verarbeitet eingehende Nachrichten.
 
-        Filtert eigene Nachrichten, ignoriert Webhooks/Bots,
-        und antwortet auf alles — Commands (mit Prefix), Erwähnung oder Chat.
+        Filtert eigene Nachrichten und fremde Bots — die Partner-Persona
+        (Locutus ↔ Seven of Nine, siehe set_peer) ist als einziger Bot
+        zugelassen, damit die beiden sich unterhalten können. Antwortet auf
+        Commands (mit Prefix), Erwähnung oder Chat.
         """
-        # Ignoriere eigene Nachrichten und Bots
-        if message.author == self.user or message.author.bot:
+        # Ignoriere eigene Nachrichten und fremde Bots; die Partner-Persona
+        # ist als Gesprächspartner zugelassen.
+        if message.author == self.user:
+            return
+        is_peer = self._is_peer_message(message)
+        if message.author.bot and not is_peer:
             return
 
         # Channel-Filter
         if self._config.channel_id and message.channel.id != self._config.channel_id:
             return
+
+        # Persona-zu-Persona: Nachrichten der Partner-Persona laufen nicht
+        # über Commands/Mentions, sondern ausschließlich über die
+        # Namens-Adressierung — und nur solange das Turn-Budget reicht
+        # (Endlosschleifen-Schutz, Reset bei jeder menschlichen Nachricht).
+        if is_peer:
+            # System-Notifications (Task-/Dreaming-Events, Agent-Ergebnisse)
+            # sind keine Gesprächsbeiträge — nicht darauf antworten, auch wenn
+            # der eigene Name im Text vorkommt ("Task Seven of Nine ...").
+            if self._service.is_notification_message(message.id):
+                return
+            content_stripped = message.content.strip()
+            if not content_stripped:
+                return
+            addressee = await self._service.resolve_addressee(message.channel.id, content_stripped)
+            if addressee not in (self._persona_key, PERSONA_COLLECTIVE):
+                return
+            if not await self._service.register_bot_dialogue_turn(message.channel.id):
+                return
+            await self._chat(message, content_stripped, from_peer=True)
+            return
+
+        # Ab hier: menschliche Nachricht — Persona-Dialog-Budget zurücksetzen.
+        await self._service.reset_bot_dialogue(message.channel.id)
 
         # Allowed User Filter
         if self._config.allowed_user_ids:
@@ -242,16 +287,17 @@ class BotClient(commands.Bot):
             logger.error(f"Error dispatching command: {e}", exc_info=True)
             await self._safe_reply(message, f"Fehler: {str(e)}", is_error=True)
 
-    async def _chat(self, message: discord.Message, text: str) -> None:
+    async def _chat(self, message: discord.Message, text: str, from_peer: bool = False) -> None:
         """
         Sende eine natürliche Chat-Nachricht an den LLM und antworte.
 
         Args:
             message: Ursprüngliche Discord-Nachricht
             text: Bereinigter Chat-Text (ohne Mention)
+            from_peer: Nachricht stammt von der Partner-Persona
         """
         try:
-            response = await self._chat_fn(text, message.author.id)
+            response = await self._chat_fn(text, message.author.id, from_peer=from_peer)
             await self._safe_reply(message, response.content, response.is_error)
         except Exception as e:
             logger.error(f"Error in chat: {e}", exc_info=True)
@@ -262,7 +308,7 @@ class BotClient(commands.Bot):
         message_or_channel: discord.Message | discord.abc.Messageable,
         content: str,
         is_error: bool = False,
-    ) -> None:
+    ) -> Optional[discord.Message]:
         """
         Sende eine Antwort an Discord mit Truncation-Schutz.
 
@@ -273,9 +319,12 @@ class BotClient(commands.Bot):
             message_or_channel: Ziel-Nachricht oder Channel
             content: Antwort-Text
             is_error: Ob es eine Fehlermeldung ist
+
+        Returns:
+            Die gesendete Discord-Nachricht, oder None bei Fehler/leerem Inhalt.
         """
         if not content:
-            return
+            return None
 
         # Truncate if needed
         if len(content) > DISCORD_MAX_LENGTH:
@@ -289,21 +338,23 @@ class BotClient(commands.Bot):
 
         try:
             if isinstance(message_or_channel, discord.Message):
-                await message_or_channel.reply(formatted, mention_author=False)
-            else:
-                await message_or_channel.send(formatted)
+                return await message_or_channel.reply(formatted, mention_author=False)
+            return await message_or_channel.send(formatted)
         except discord.HTTPException as e:
             logger.error(f"Failed to send Discord message: {e}")
         except discord.Forbidden:
             logger.error(f"{self._persona_name} hat keine Berechtigung, in diesem Channel zu senden")
         except Exception as e:
             logger.error(f"Unexpected error sending Discord message: {e}")
+        return None
 
     async def send_notification(self, content: str) -> None:
         """
         Sende eine Notification an den konfigurierten Channel.
 
         Wird vom TaskEventListener aufgerufen wenn Tasks starten/fehl schlagen/fertig werden.
+        Die gesendete Nachricht wird im Service als System-Notification registriert,
+        damit die Partner-Persona nicht darauf antwortet (siehe on_message).
 
         Args:
             content: Notification-Text
@@ -321,7 +372,9 @@ class BotClient(commands.Bot):
                 logger.warning("No channel available for notification")
                 return
 
-        await self._safe_reply(channel, content)
+        sent = await self._safe_reply(channel, content)
+        if sent is not None:
+            self._service.register_notification_message(sent.id)
 
     async def wait_until_ready(self, timeout: float = 30.0) -> None:
         """
