@@ -8,6 +8,11 @@ from typing import Any
 from sqlalchemy import delete, select
 
 from app.second_brain.action_models import ActionMemory
+from app.second_brain.archon_failures import (
+    canonical_metadata_core,
+    canonical_tags,
+    categorize,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.archon_system.client import ArchonClient, ArchonUnavailable
@@ -233,8 +238,15 @@ async def _upsert_run_action_memory(db: AsyncSession, raw: dict[str, Any], mappe
             error_section.append("\n".join(accumulated_errors))
         description_parts.append("\n".join(error_section))
 
+    category = (
+        categorize("\n".join(accumulated_errors)) if signals["has_errors"] else None
+    )
+
     raw_metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
-    metadata = {
+    metadata = canonical_metadata_core(
+        mapped.get("workflow_name"), category, accumulated_errors
+    )
+    metadata.update({
         "archon_run_id": archon_run_id,
         "workflow_name": mapped.get("workflow_name"),
         "archon_status": mapped.get("status"),
@@ -251,19 +263,16 @@ async def _upsert_run_action_memory(db: AsyncSession, raw: dict[str, Any], mappe
         "current_step_status": raw.get("current_step_status"),
         "has_errors": signals["has_errors"],
         "error_count": len(accumulated_errors),
-        "errors": accumulated_errors,
         # Full Archon run metadata (complete error narrative / output) kept untruncated.
         "archon_metadata": raw_metadata,
-    }
+    })
 
-    tags = [
-        "archon",
-        "workflow-run",
-        mapped.get("workflow_name") or "unknown-workflow",
-        mapped.get("status") or "unknown",
-    ]
+    tags = canonical_tags(mapped.get("workflow_name"), action_status, category)
+    tags.insert(1, "workflow-run")
+    tags.append(mapped.get("status") or "unknown")
     if signals["has_errors"]:
         tags.append("has-errors")
+    tags = list(dict.fromkeys(tags))
 
     if action is None:
         action = ActionMemory(

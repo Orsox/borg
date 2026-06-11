@@ -7,9 +7,6 @@
 		{ href: '/', label: 'Dashboard', icon: '⬡' },
 		{ href: '/archon', label: 'Archon Hub', icon: '◈' },
 		{ href: '/brain', label: 'Second Brain', icon: '◉' },
-		{ href: '/brain/actions', label: 'Action Memory', icon: '⬢' },
-		{ href: '/brain/vault', label: 'Vault', icon: '◈' },
-		{ href: '/brain/graph', label: 'Obsidian Graph', icon: '⊛' },
 		{ href: '/tasks', label: 'Task Automation', icon: '◆' },
 		{ href: '/settings', label: 'Settings', icon: '⚙' },
 	];

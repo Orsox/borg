@@ -194,7 +194,43 @@ async def test_archon_failure_ingestion(tmp_path):
         assert len(items) == 1
         entry = items[0]
         assert "demo-fail" in entry.title
-        assert "timeout" in action_service._json_to_tags(entry.tags)
+        assert "archon:timeout" in action_service._json_to_tags(entry.tags)
+
+
+@pytest.mark.asyncio
+async def test_archon_ingestion_dedups_by_run_id(tmp_path):
+    """Logs carrying a workflowRunId dedup against runs mirrored from the live API."""
+    from app.database import AsyncSessionLocal
+    from app.second_brain import action_service
+    from app.second_brain.archon_ingest import ingest_archon_run_failures
+
+    run_id = "a" * 32
+    run_logs = tmp_path / "run-logs"
+    run_logs.mkdir()
+    (run_logs / "with-id.log").write_text(
+        f'{{"workflowRunId":"{run_id}","msg":"start"}}\n'
+        "Running workflow: demo\n"
+        "Error: Workflow failed: The operation timed out.\n",
+        encoding="utf-8",
+    )
+
+    async with AsyncSessionLocal() as db:
+        res = await ingest_archon_run_failures(db, archon_dir=tmp_path)
+        assert res["created"] == 1
+        failed = await action_service.list_action_memories(db, status="failed")
+        entry = failed["items"][0]
+        assert entry.source_ref == run_id  # run id becomes the canonical ref
+
+    # A run already mirrored from the live API blocks re-ingestion from logs.
+    (run_logs / "with-id-copy.log").write_text(
+        f'{{"workflowRunId":"{run_id}","msg":"start"}}\n'
+        "Error: Workflow failed: The operation timed out.\n",
+        encoding="utf-8",
+    )
+    async with AsyncSessionLocal() as db:
+        res2 = await ingest_archon_run_failures(db, archon_dir=tmp_path)
+        assert res2["created"] == 0
+        assert res2["skipped"] == 2  # original log ref + run-id duplicate
 
 
 @pytest.mark.asyncio

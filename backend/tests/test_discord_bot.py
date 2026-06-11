@@ -2145,3 +2145,46 @@ class TestChatHistory:
             {"role": "assistant", "content": "Auftrag abgeschlossen: Branch agent-mode/x gepusht."},
             {"role": "user", "content": "Hat es geklappt?"},
         ]
+
+
+class TestInsightsDigestFormatting:
+    """Tests für die Formatierung des insights_digest-Events."""
+
+    def test_digest_lists_top_insights(self):
+        from app.discord_bot.listener import _format_insights_digest
+
+        event = {
+            "type": "insights_digest",
+            "run_id": 7,
+            "created": 2,
+            "updated": 1,
+            "total_open": 3,
+            "top": [
+                {
+                    "category": "timeout",
+                    "workflow": "borg-queen",
+                    "occurrences": 5,
+                    "recommendation": "Increase step timeouts.",
+                },
+                {
+                    "category": "worktree",
+                    "workflow": None,
+                    "occurrences": 2,
+                    "recommendation": "Clean stale worktrees.",
+                },
+            ],
+        }
+        formatted = _format_insights_digest(event)
+        assert formatted is not None
+        assert "Dreaming #7" in formatted
+        assert "2 neue / 1 aktualisierte" in formatted
+        assert "timeout @ borg-queen (5x)" in formatted
+        assert "Increase step timeouts." in formatted
+        assert "worktree @ alle Workflows (2x)" in formatted
+        assert "Second Brain → Insights" in formatted
+
+    def test_digest_returns_none_without_top_insights(self):
+        from app.discord_bot.listener import _format_insights_digest
+
+        assert _format_insights_digest({"type": "insights_digest", "top": []}) is None
+        assert _format_insights_digest({"type": "insights_digest"}) is None

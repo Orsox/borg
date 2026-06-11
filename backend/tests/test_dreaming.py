@@ -199,6 +199,62 @@ async def test_manual_trigger_events_carry_persona():
 
 
 @pytest.mark.asyncio
+async def test_dreaming_cycle_generates_insights_and_digest_event():
+    """A dreaming cycle over failed archon actions creates ImprovementInsights
+    and pushes an insights_digest SSE event carrying the persona."""
+    import asyncio
+
+    from app.second_brain.insight_models import ImprovementInsight
+    from app.task_automation.scheduler import sse_queue
+
+    while not sse_queue.empty():
+        sse_queue.get_nowait()
+
+    now = datetime.now(timezone.utc)
+    async with AsyncSessionLocal() as db:
+        for i in range(5):
+            db.add(ActionMemory(
+                title=f"archon failure {i}",
+                action_type="archon_run",
+                description="Error: The operation timed out.",
+                tags=json.dumps(["archon", "borg-queen", "failed", "failure", "archon:timeout"]),
+                status="failed",
+                created_at=now - timedelta(hours=i),
+                metadata_json=json.dumps({"workflow": "borg-queen", "category": "timeout", "errors": []}),
+            ))
+        await db.commit()
+
+    result = await run_dreaming_cycle(
+        AsyncSessionLocal(), days=14, min_actions=1, persona="seven"
+    )
+    assert result["status"] == "success"
+
+    async with AsyncSessionLocal() as db:
+        insight = (
+            await db.execute(select(ImprovementInsight))
+        ).scalar_one()
+        assert insight.dedup_key == "timeout:borg-queen"
+        assert insight.occurrences == 5
+        assert insight.status == "open"
+
+    digest = None
+    for _ in range(10):
+        try:
+            event = await asyncio.wait_for(sse_queue.get(), timeout=5.0)
+        except asyncio.TimeoutError:
+            break
+        if event.get("type") == "insights_digest":
+            digest = event
+            break
+    assert digest is not None
+    assert digest["persona"] == "seven"
+    assert digest["created"] == 1
+    assert digest["total_open"] == 1
+    assert digest["top"][0]["category"] == "timeout"
+    assert digest["top"][0]["workflow"] == "borg-queen"
+
+
+@pytest.mark.asyncio
 async def test_scheduled_dreaming_task_does_not_self_deadlock():
     """Regression: _execute_task hielt eine offene Schreibtransaktion (TaskRun-
     INSERT nur geflusht, nicht committed), während der Dreaming-Zyklus in einer

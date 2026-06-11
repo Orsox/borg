@@ -441,3 +441,43 @@ async def test_errors_accumulate_across_syncs(auth_headers):
         assert error_2 in meta["errors"]
         assert error_1 in action.description
         assert error_2 in action.description
+
+
+@pytest.mark.asyncio
+async def test_failed_run_gets_canonical_category_tag(auth_headers):
+    """Failed runs synced from the live API carry the canonical archon:<category>
+    tag and category metadata, matching the log-scan ingest path."""
+    from app.main import app
+    from app.archon_system.client import ArchonClient
+
+    mock_client = AsyncMock(spec=ArchonClient)
+    mock_client.get_runs = AsyncMock(return_value=[
+        {
+            "id": "run-categorized",
+            "workflow_name": "borg-queen",
+            "status": "failed",
+            "metadata": {"error": "SDK returned error — The operation timed out."},
+        }
+    ])
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("app.archon_system.service.ArchonClient", return_value=mock_client):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            assert (await client.get("/api/archon-system/runs", headers=auth_headers)).status_code == 200
+
+    async with AsyncSessionLocal() as db:
+        action = (
+            await db.execute(
+                select(ActionMemory).where(ActionMemory.source_ref == "run-categorized")
+            )
+        ).scalar_one()
+        tags = json.loads(action.tags)
+        assert "archon:timeout" in tags
+        assert "archon" in tags
+        assert "workflow-run" in tags
+        assert "has-errors" in tags
+        meta = json.loads(action.metadata_json)
+        assert meta["category"] == "timeout"
+        assert meta["workflow"] == "borg-queen"

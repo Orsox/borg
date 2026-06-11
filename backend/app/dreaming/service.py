@@ -324,6 +324,27 @@ async def run_dreaming_cycle(
         except Exception:
             logger.exception(f"Gap analysis failed for dreaming run #{run.id}")
 
+        # Refresh improvement insights from the same failure window and announce
+        # new findings. Insight failures never sour a successful dreaming run.
+        insight_result: dict[str, Any] = {}
+        try:
+            from app.second_brain.insight_service import generate_insights
+
+            insight_result = await generate_insights(db, days=days)
+            if insight_result["created"] or insight_result["updated"]:
+                await sse_queue.put({
+                    "type": "insights_digest",
+                    "run_id": run.id,
+                    "created": insight_result["created"],
+                    "updated": insight_result["updated"],
+                    "total_open": insight_result["total_open"],
+                    "top": insight_result["top"][:5],
+                    "persona": persona,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+        except Exception:
+            logger.exception(f"Insight generation failed for dreaming run #{run.id}")
+
         return {
             "status": "success",
             "run_id": run.id,

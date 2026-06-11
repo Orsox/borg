@@ -2,6 +2,7 @@
 	import { currentUser } from '$lib/stores/auth';
 	import BorgPanel from '$lib/components/BorgPanel.svelte';
 	import ArchonSystemPanel from '$lib/components/ArchonSystemPanel.svelte';
+	import ImproveNextPanel from '$lib/components/ImproveNextPanel.svelte';
 </script>
 
 <svelte:head>
@@ -15,6 +16,8 @@
 	</header>
 
 	<ArchonSystemPanel />
+
+	<ImproveNextPanel />
 
 	<div class="module-grid">
 		<BorgPanel class="module-card">

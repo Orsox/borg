@@ -29,6 +29,10 @@ GAP_ANALYSIS_EVENT_TYPES = ("gap_analysis_completed",)
 # not execution) — also not Task-shaped, gets its own formatter.
 SKILL_CREATION_EVENT_TYPES = ("skill_drafted", "skill_draft_failed")
 
+# Improvement insights are regenerated at the end of a dreaming cycle and
+# summarize recurring Archon failures — also not Task-shaped.
+INSIGHTS_EVENT_TYPES = ("insights_digest",)
+
 
 def _format_dreaming_event(event_dict: dict) -> Optional[str]:
     """Format a dreaming_run_* SSE event dict into a Discord notification string."""
@@ -94,6 +98,34 @@ def _format_skill_creation_event(event_dict: dict) -> Optional[str]:
     return (
         f"🛠 Skill `{name}` aus Vorschlag #{log_id} entworfen, bereit zur Prüfung unter `{path}`."
     )
+
+
+def _format_insights_digest(event_dict: dict) -> Optional[str]:
+    """Format an insights_digest SSE event into a Discord notification string.
+
+    Returns None when there are no top insights — silence beats spam.
+    """
+    top = event_dict.get("top") or []
+    if not top:
+        return None
+
+    created = event_dict.get("created", 0)
+    updated = event_dict.get("updated", 0)
+    total_open = event_dict.get("total_open", 0)
+    run_id = event_dict.get("run_id")
+
+    lines = [
+        f"🧠 Verbesserungs-Digest (Dreaming #{run_id}): "
+        f"{created} neue / {updated} aktualisierte Erkenntnis(se), {total_open} offen."
+    ]
+    for insight in top:
+        workflow = insight.get("workflow") or "alle Workflows"
+        lines.append(
+            f"  • {insight.get('category')} @ {workflow} ({insight.get('occurrences')}x) — "
+            f"{insight.get('recommendation')}"
+        )
+    lines.append("Details in der BorgOS-UI: Second Brain → Insights.")
+    return "\n".join(lines)
 
 
 class TaskEventListener:
@@ -180,6 +212,13 @@ class TaskEventListener:
                 formatted = _format_skill_creation_event(event_dict)
                 if formatted:
                     logger.info(f"Skill creation notification: {formatted}")
+                    await self._callback(formatted, persona)
+                return
+
+            if event_type in INSIGHTS_EVENT_TYPES:
+                formatted = _format_insights_digest(event_dict)
+                if formatted:
+                    logger.info(f"Insights digest notification: {formatted}")
                     await self._callback(formatted, persona)
                 return
 

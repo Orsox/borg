@@ -20,8 +20,10 @@ from app.auth.models import User  # noqa: F401 — ensures model is registered
 from app.auth.router import router as auth_router, users_router
 from app.second_brain.models import Note, NoteLink  # noqa: F401
 from app.second_brain.action_models import ActionMemory  # noqa: F401
+from app.second_brain.insight_models import ImprovementInsight  # noqa: F401
 from app.second_brain.router import router as brain_router
 from app.second_brain.action_router import router as action_router
+from app.second_brain.insight_router import router as insight_router
 from app.second_brain import action_service as action_memory_service
 from app.task_automation.models import Task, TaskRun  # noqa: F401
 from app.locutus.models import CharacterProfile, CharacterMemoryEntry, ReasoningLog, EvolutionBudget, SkillRecord  # noqa: F401
@@ -386,6 +388,7 @@ app.include_router(archon_router)
 app.include_router(archon_system_router)
 app.include_router(brain_router)
 app.include_router(action_router)
+app.include_router(insight_router)
 app.include_router(task_router)
 app.include_router(skills_router)
 app.include_router(dreaming_router)

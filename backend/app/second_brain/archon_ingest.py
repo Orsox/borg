@@ -5,12 +5,15 @@ pino JSON + human-readable lines). This module scans those logs, detects runs
 that failed, and records each as a ``status="failed"`` ActionMemory entry so the
 failures surface in the Second Brain and the Obsidian graph.
 
-Idempotent: each log maps to a stable ``source_ref`` (``<subdir>/<filename>``);
-logs already imported under ``source_kind="archon_run"`` are skipped.
+Idempotent: each log maps to a stable ``source_ref`` — the Archon run id when it
+can be extracted from the log (pino ``workflowRunId``), otherwise
+``<subdir>/<filename>``. Refs already imported under ``source_kind="archon_run"``
+are skipped, including runs that the live-API sync (``archon_system``) has
+already mirrored under the same run id. Residual risk: a run whose log carries
+no run id AND that is also mirrored from the live API yields two entries —
+only possible for old log formats.
 """
 
-import json
-import re
 from pathlib import Path
 
 from sqlalchemy import select
@@ -18,90 +21,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.second_brain import action_service
 from app.second_brain.action_models import ActionMemory
+from app.second_brain.archon_failures import (
+    canonical_metadata_core,
+    canonical_tags,
+    categorize,
+    extract_failure_summary,
+    extract_workflow_name,
+    extract_workflow_run_id,
+)
 
 # This file: backend/app/second_brain/archon_ingest.py → parents[3] == repo root.
 _DEFAULT_ARCHON_DIR = Path(__file__).resolve().parents[3] / ".archon"
 _LOG_SUBDIRS = ("run-logs", "logs")
 _SOURCE_KIND = "archon_run"
-_MAX_SUMMARY = 1500
-
-# Ordered keyword rules → a coarse failure category used as a shared tag so that
-# similar failures cluster together when the graph links nodes by tag.
-_CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
-    ("timeout", ("timed out", "timeout")),
-    ("model-crash", ("model has crashed",)),
-    ("model-not-found", ("model not found",)),
-    ("worktree", ("worktree",)),
-    ("stale-ctx", ("stale after session", "this.stalemessage")),
-    ("no-resumable-run", ("no resumable run",)),
-    ("already-active", ("already active on this path",)),
-]
-
-
-def _extract_failure(text: str) -> str | None:
-    """Return a concise failure summary if the log indicates a failed run, else None."""
-    lines = text.splitlines()
-    low = text.lower()
-
-    failed = (
-        '"anyfailed":true' in low
-        or "completed with failures" in low
-        or any(line.lstrip().startswith("❌") for line in lines)
-        or any(line.strip().startswith("Error:") for line in lines)
-    )
-    if not failed:
-        return None
-
-    # Prefer the human-readable ❌ summary. Logs also print bare "❌" progress
-    # markers, so collect non-empty ones and pick the most informative.
-    cross = [
-        c for line in lines
-        if line.lstrip().startswith("❌") and (c := line.lstrip().lstrip("❌").strip())
-    ]
-    for c in cross:
-        lc = c.lower()
-        if "completed with failures" in lc or "completed with no successful" in lc:
-            return c[:_MAX_SUMMARY]
-    if cross:
-        return max(cross, key=len)[:_MAX_SUMMARY]
-
-    # Next: the last top-level "Error:" line.
-    err_lines = [line.strip() for line in lines if line.strip().startswith("Error:")]
-    if err_lines:
-        return err_lines[-1][:_MAX_SUMMARY]
-
-    # Fallback: a structured error log line (pino level 50).
-    for line in lines:
-        s = line.strip()
-        if s.startswith("{") and '"level":50' in s:
-            try:
-                obj = json.loads(s)
-            except json.JSONDecodeError:
-                continue
-            err = obj.get("err")
-            msg = (err.get("message") if isinstance(err, dict) else None) or obj.get("msg")
-            if msg:
-                return str(msg)[:_MAX_SUMMARY]
-
-    return "Workflow run failed (see log for details)."
-
-
-def _workflow_name(text: str, fallback: str) -> str:
-    m = re.search(r"Running workflow:\s*(\S+)", text)
-    if m:
-        return m.group(1)
-    m = re.search(r"workflow '([^']+)'", text)
-    if m:
-        return m.group(1)
-    return fallback
-
-
-def _category(text: str) -> str | None:
-    low = text.lower()
-    for cat, keywords in _CATEGORY_RULES:
-        if any(k in low for k in keywords):
-            return cat
-    return None
 
 
 async def ingest_archon_run_failures(
@@ -127,8 +59,8 @@ async def ingest_archon_run_failures(
             continue
         for log in sorted(log_dir.glob("*.log")):
             result["scanned"] += 1
-            ref = f"{sub}/{log.name}"
-            if ref in existing:
+            log_ref = f"{sub}/{log.name}"
+            if log_ref in existing:
                 result["skipped"] += 1
                 continue
             try:
@@ -136,18 +68,21 @@ async def ingest_archon_run_failures(
             except OSError:
                 continue
 
-            summary = _extract_failure(text)
+            run_id = extract_workflow_run_id(text)
+            if run_id and run_id in existing:
+                # Already mirrored from the live Archon API under the run id.
+                result["skipped"] += 1
+                continue
+            ref = run_id or log_ref
+
+            summary = extract_failure_summary(text)
             if summary is None:
                 continue  # run did not fail
 
-            workflow = _workflow_name(text, log.stem)
-            category = _category(text)
-            tags = list(dict.fromkeys(
-                ["archon", "failure", workflow] + ([category] if category else [])
-            ))
-            metadata = {"log_file": ref, "workflow": workflow}
-            if category:
-                metadata["category"] = category
+            workflow = extract_workflow_name(text, log.stem)
+            category = categorize(text)
+            metadata = canonical_metadata_core(workflow, category, [summary])
+            metadata["log_file"] = log_ref
 
             await action_service.create_action_memory(
                 db,
@@ -155,9 +90,9 @@ async def ingest_archon_run_failures(
                 description=summary,
                 action_type="archon_run",
                 status="failed",
-                tags=tags,
+                tags=canonical_tags(workflow, "failed", category),
                 metadata=metadata,
-                output_path=ref,
+                output_path=log_ref,
                 source_kind=_SOURCE_KIND,
                 source_ref=ref,
             )
