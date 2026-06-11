@@ -98,7 +98,8 @@ class SearchResultItem(BaseModel):
     tags: list[str]
     ref: str           # rel_path (vault) or str(id) (note/action) — used to open the item
     snippet: str
-    score: int         # 3 = title match, 2 = tag match, 1 = content match
+    score: int         # 3 = title match, 2 = tag match, 1 = content match, 0 = browse
+    updated_at: Optional[datetime] = None
 
 
 class FederatedSearchResponse(BaseModel):

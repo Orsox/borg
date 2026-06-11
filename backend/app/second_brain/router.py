@@ -174,9 +174,9 @@ async def get_backlinks(
 
 @router.get("/search", response_model=FederatedSearchResponse)
 async def search_brain(
-    q: str = Query(..., min_length=1),
+    q: str = Query(default=""),
     sources: str = Query(default="note,vault,action"),
-    limit: int = Query(default=20, ge=1, le=50),
+    limit: int = Query(default=20, ge=1, le=200),
     db: AsyncSession = Depends(get_session),
     _user=Depends(get_current_user),
 ):
@@ -184,6 +184,8 @@ async def search_brain(
 
     Result IDs are namespaced ("note:", "vault:", "action:") like the
     combined graph, so a hit from any source opens in the same detail view.
+    An empty q is browse mode: all items from the selected sources, newest
+    first — this feeds the workspace item list.
     """
     requested = {s.strip().lower() for s in sources.split(",") if s.strip()}
     selected = requested & VALID_SOURCES

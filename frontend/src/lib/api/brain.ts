@@ -141,6 +141,7 @@ export interface BrainSearchResult {
 	ref: string;
 	snippet: string;
 	score: number;
+	updated_at: string | null;
 }
 
 export interface BrainSearchResponse {

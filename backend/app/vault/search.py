@@ -7,6 +7,7 @@ always include vault results.
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import frontmatter
@@ -45,12 +46,17 @@ class VaultSearchHit:
     tags: list[str]
     snippet: str
     score: int
+    mtime: datetime
 
 
 def search_vault_files(vault_path: Path, query: str, limit: int = 20) -> list[VaultSearchHit]:
-    """Scan all vault .md files and match query against title, tags, and content."""
+    """Scan all vault .md files and match query against title, tags, and content.
+
+    An empty query is browse mode: every note matches with score 0 and the
+    result is ordered by file mtime (newest first) instead of match quality.
+    """
     q = query.strip().lower()
-    if not q or not vault_path.is_dir():
+    if not vault_path.is_dir():
         return []
 
     hits: list[VaultSearchHit] = []
@@ -65,7 +71,9 @@ def search_vault_files(vault_path: Path, query: str, limit: int = 20) -> list[Va
         except Exception:
             content = ""
 
-        if q in parsed.title.lower():
+        if not q:
+            score = 0
+        elif q in parsed.title.lower():
             score = SCORE_TITLE
         elif any(q in t.lower() for t in parsed.tags):
             score = SCORE_TAG
@@ -74,14 +82,23 @@ def search_vault_files(vault_path: Path, query: str, limit: int = 20) -> list[Va
         else:
             continue
 
+        try:
+            mtime = datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            mtime = datetime.fromtimestamp(0, tz=timezone.utc)
+
         hits.append(VaultSearchHit(
             rel_path=parsed.rel_path,
             title=parsed.title,
             kind=classify(parsed).value,
             tags=parsed.tags,
-            snippet=make_snippet(content, q),
+            snippet=make_snippet(content, q) if q else content[:160].strip(),
             score=score,
+            mtime=mtime,
         ))
 
-    hits.sort(key=lambda h: (-h.score, h.title.lower()))
+    if q:
+        hits.sort(key=lambda h: (-h.score, h.title.lower()))
+    else:
+        hits.sort(key=lambda h: h.mtime, reverse=True)
     return hits[:limit]

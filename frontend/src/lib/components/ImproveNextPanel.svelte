@@ -34,7 +34,7 @@
 						<span class="improve-rec">{insight.recommendation}</span>
 					</div>
 				{/each}
-				<a href="/brain/insights" class="improve-link">All insights →</a>
+				<a href="/brain?insights=1" class="improve-link">All insights →</a>
 			{/if}
 		</div>
 	</BorgPanel>

@@ -111,6 +111,46 @@ async def test_search_vault_source(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_browse_mode_lists_all_newest_first(tmp_path, monkeypatch):
+    """Empty q returns all items from selected sources ordered by updated_at desc."""
+    from app.main import app
+
+    (tmp_path / "old.md").write_text("ancient lore\n", encoding="utf-8")
+    monkeypatch.setattr("app.vault.router.VAULT", tmp_path)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        headers = await _login(client)
+
+        await client.post(
+            "/api/brain/notes",
+            json={"title": "First note", "content": "alpha", "tags": []},
+            headers=headers,
+        )
+        await client.post(
+            "/api/brain/actions",
+            json={"title": "Some action", "action_type": "test", "status": "success"},
+            headers=headers,
+        )
+
+        resp = await client.get("/api/brain/search", headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["query"] == ""
+
+        results = data["results"]
+        sources = {r["source"] for r in results}
+        assert {"note", "action", "vault"} <= sources
+        assert all(r["score"] == 0 for r in results)
+        assert all(r["updated_at"] is not None for r in results)
+
+        # Newest first across sources (DB rows just created beat the vault file).
+        timestamps = [r["updated_at"] for r in results]
+        assert results[0]["source"] in {"note", "action"}
+        assert timestamps == sorted(timestamps, reverse=True)
+
+
+@pytest.mark.asyncio
 async def test_search_rejects_unknown_sources():
     from app.main import app
     transport = ASGITransport(app=app)
