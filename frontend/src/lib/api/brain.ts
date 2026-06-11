@@ -159,3 +159,24 @@ export async function searchBrain(
 	if (sources?.length) params.set('sources', sources.join(','));
 	return apiFetch<BrainSearchResponse>(`/brain/search?${params}`);
 }
+
+// --- Per-item relations (links, backlinks, shared-tag neighbors) ---
+export interface RelatedItem {
+	id: string;
+	title: string;
+	source: GraphSource;
+	kind: string;
+	tags: string[];
+	ref: string;
+}
+
+export interface ItemRelations {
+	id: string;
+	links: RelatedItem[];
+	backlinks: RelatedItem[];
+	related: RelatedItem[];
+}
+
+export async function getItemRelations(id: string): Promise<ItemRelations> {
+	return apiFetch<ItemRelations>(`/brain/related?id=${encodeURIComponent(id)}`);
+}

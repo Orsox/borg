@@ -13,6 +13,7 @@
 	import NoteEditor from '$lib/components/NoteEditor.svelte';
 	import BrainGraphView from '$lib/components/BrainGraphView.svelte';
 	import InsightsPanel from '$lib/components/InsightsPanel.svelte';
+	import RelatedPanel from '$lib/components/RelatedPanel.svelte';
 	import { searchBrain, createNote, type BrainSearchResult, type GraphSource } from '$lib/api/brain';
 	import { listDrafts, getHabits, getHeartbeatStatus } from '$lib/api/vault';
 
@@ -183,17 +184,17 @@
 		}
 	}
 
+	// Bumped on save so the relations panel re-fetches (wiki-links may have changed).
+	let relationsVersion = $state(0);
+
 	function onNoteSaved() {
+		relationsVersion++;
 		loadItems();
 	}
 
 	function onNoteArchived() {
 		selectItem(null);
 		loadItems();
-	}
-
-	function onBacklinkNavigate(id: number) {
-		selectItem(itemFromId(`note:${id}`));
 	}
 
 	function formatTime(dateStr: string | null): string {
@@ -327,7 +328,6 @@
 						noteId={Number(selectedItem.ref)}
 						onsaved={onNoteSaved}
 						onarchived={onNoteArchived}
-						onnavigate={onBacklinkNavigate}
 					/>
 				{:else if selectedItem}
 					<BrainItemPanel item={selectedItem} onclose={() => selectItem(null)} />
@@ -335,11 +335,19 @@
 					<BorgPanel class="empty-detail-panel">
 						<div class="editor-empty">
 							<p>Select an item — notes open in the editor, vault &amp; actions in the reader.</p>
-							<p class="hint">Use [[Note Title]] syntax to create links between notes.</p>
+							<p class="hint">Use [[Note Title]] syntax to create links between notes — vault titles resolve too.</p>
 						</div>
 					</BorgPanel>
 				{/if}
 			</div>
+
+			{#if selectedItem}
+				<div class="context-area">
+					{#key relationsVersion}
+						<RelatedPanel itemId={selectedItem.id} onnavigate={(item) => selectItem(item)} />
+					{/key}
+				</div>
+			{/if}
 		</div>
 	{:else}
 		<div class="graph-layout">
@@ -352,6 +360,7 @@
 			{#if selectedItem}
 				<div class="graph-detail-wrap">
 					<BrainItemPanel item={selectedItem} onclose={() => selectItem(null)} />
+					<RelatedPanel itemId={selectedItem.id} onnavigate={(item) => selectItem(item)} />
 				</div>
 			{/if}
 		</div>
@@ -620,6 +629,13 @@
 		flex-direction: column;
 	}
 
+	.context-area {
+		width: 280px;
+		min-width: 240px;
+		max-height: 700px;
+		overflow-y: auto;
+	}
+
 	.detail-area > :global(*) {
 		flex: 1;
 	}
@@ -657,6 +673,9 @@
 		min-width: 380px;
 		max-height: 700px;
 		overflow-y: auto;
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
 	}
 
 	.loading-text {

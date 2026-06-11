@@ -90,6 +90,22 @@ class CombinedGraph(BaseModel):
     edges: list[CombinedGraphEdge]
 
 
+class RelatedItem(BaseModel):
+    id: str            # namespaced like CombinedGraphNode ids
+    title: str
+    source: str
+    kind: str
+    tags: list[str]
+    ref: str
+
+
+class ItemRelations(BaseModel):
+    id: str
+    links: list[RelatedItem]      # outgoing wiki-links (any source)
+    backlinks: list[RelatedItem]  # items linking here (any source)
+    related: list[RelatedItem]    # shared-tag neighbors, strongest overlap first
+
+
 class SearchResultItem(BaseModel):
     id: str            # namespaced like CombinedGraphNode ids
     title: str
