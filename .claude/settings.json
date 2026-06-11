@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run pytest *)",
+      "Bash(docker compose logs *)",
+      "Bash(docker compose ps)",
+      "Bash(docker compose ps *)",
+      "Bash(archon workflow list)",
+      "Bash(archon workflow list *)",
+      "Bash(npm run check)",
+      "Bash(npm run check *)",
+      "Bash(archon workflow status)",
+      "Bash(archon workflow status *)",
+      "Bash(archon validate *)",
+      "Bash(archon isolation list)",
+      "Bash(archon isolation list *)",
+      "Bash(npm view *)"
+    ]
+  }
+}
