@@ -8,7 +8,8 @@ export default defineConfig({
 		port: 5173,
 		proxy: {
 			'/api': {
-				target: 'http://localhost:8000',
+				// Override when :8000 is taken (e.g. by the LM Studio container)
+				target: process.env.BORG_BACKEND_URL ?? 'http://localhost:8000',
 				changeOrigin: true
 			}
 		}
