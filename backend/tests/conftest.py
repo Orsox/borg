@@ -8,6 +8,7 @@ from app.database import Base, AsyncSessionLocal, engine
 from app.archon_system.models import ArchonSystemHealth, ArchonRun, ArchonCodebase, ArchonWorkflowMeta  # noqa: F401
 from app.second_brain.action_models import ActionMemory  # noqa: F401
 from app.second_brain.insight_models import ImprovementInsight  # noqa: F401
+from app.second_brain.models import Note, NoteLink  # noqa: F401
 from app.locutus.models import CharacterProfile, CharacterMemoryEntry, ReasoningLog, EvolutionBudget, SkillRecord, LocutusAuditEntry  # noqa: F401
 
 
