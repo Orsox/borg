@@ -130,3 +130,31 @@ export async function getCombinedGraph(linkTags = false): Promise<CombinedGraph>
 	const params = linkTags ? '?link_tags=true' : '';
 	return apiFetch<CombinedGraph>(`/brain/graph/combined${params}`);
 }
+
+// --- Federated search (vault + DB notes + action memory) ---
+export interface BrainSearchResult {
+	id: string;
+	title: string;
+	source: GraphSource;
+	kind: string;
+	tags: string[];
+	ref: string;
+	snippet: string;
+	score: number;
+}
+
+export interface BrainSearchResponse {
+	query: string;
+	sources: string[];
+	results: BrainSearchResult[];
+}
+
+export async function searchBrain(
+	q: string,
+	sources?: GraphSource[],
+	limit = 20,
+): Promise<BrainSearchResponse> {
+	const params = new URLSearchParams({ q, limit: String(limit) });
+	if (sources?.length) params.set('sources', sources.join(','));
+	return apiFetch<BrainSearchResponse>(`/brain/search?${params}`);
+}

@@ -12,6 +12,7 @@ from app.second_brain.schemas import (
     CombinedGraph,
     CombinedGraphEdge,
     CombinedGraphNode,
+    FederatedSearchResponse,
     GraphEdge,
     GraphNode,
     KnowledgeGraph,
@@ -21,6 +22,7 @@ from app.second_brain.schemas import (
     NoteUpdate,
     PaginatedNotes,
 )
+from app.second_brain.search import VALID_SOURCES, federated_search
 from app.auth.router import get_current_user
 from app.database import get_session
 
@@ -168,6 +170,35 @@ async def get_backlinks(
         raise HTTPException(status_code=404, detail=f"Note {note_id} not found")
     backlinks = await service.get_backlinks(db, note_id)
     return [BacklinkItem(id=b.id, title=b.title, updated_at=b.updated_at) for b in backlinks]
+
+
+@router.get("/search", response_model=FederatedSearchResponse)
+async def search_brain(
+    q: str = Query(..., min_length=1),
+    sources: str = Query(default="note,vault,action"),
+    limit: int = Query(default=20, ge=1, le=50),
+    db: AsyncSession = Depends(get_session),
+    _user=Depends(get_current_user),
+):
+    """One search box across DB notes, the Obsidian vault, and action memory.
+
+    Result IDs are namespaced ("note:", "vault:", "action:") like the
+    combined graph, so a hit from any source opens in the same detail view.
+    """
+    requested = {s.strip().lower() for s in sources.split(",") if s.strip()}
+    selected = requested & VALID_SOURCES
+    if not selected:
+        raise HTTPException(
+            status_code=400,
+            detail=f"sources must include at least one of: {', '.join(sorted(VALID_SOURCES))}",
+        )
+
+    results = await federated_search(db, q, selected, limit=limit)
+    return FederatedSearchResponse(
+        query=q,
+        sources=sorted(selected),
+        results=results,
+    )
 
 
 @router.get("/graph", response_model=KnowledgeGraph)

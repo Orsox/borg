@@ -11,6 +11,7 @@
 		autofocus?: boolean;
 		oninput?: (e: Event) => void;
 		onchange?: (e: Event) => void;
+		onfocus?: (e: FocusEvent) => void;
 	}
 
 	let {
@@ -24,7 +25,8 @@
 		autocomplete,
 		autofocus = false,
 		oninput,
-		onchange
+		onchange,
+		onfocus
 	}: Props = $props();
 </script>
 
@@ -40,6 +42,7 @@
 	class="borg-input {cls}"
 	{oninput}
 	{onchange}
+	{onfocus}
 />
 
 <style>

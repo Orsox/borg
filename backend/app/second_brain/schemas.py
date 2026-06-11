@@ -88,3 +88,20 @@ class CombinedGraphEdge(BaseModel):
 class CombinedGraph(BaseModel):
     nodes: list[CombinedGraphNode]
     edges: list[CombinedGraphEdge]
+
+
+class SearchResultItem(BaseModel):
+    id: str            # namespaced like CombinedGraphNode ids
+    title: str
+    source: str        # "vault" | "note" | "action"
+    kind: str
+    tags: list[str]
+    ref: str           # rel_path (vault) or str(id) (note/action) — used to open the item
+    snippet: str
+    score: int         # 3 = title match, 2 = tag match, 1 = content match
+
+
+class FederatedSearchResponse(BaseModel):
+    query: str
+    sources: list[str]
+    results: list[SearchResultItem]
