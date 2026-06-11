@@ -36,6 +36,11 @@
 	let draftCount = $state<number | null>(null);
 	let habitsDone = $state<[number, number] | null>(null);
 	let heartbeatAge = $state<string | null>(null);
+	let heartbeatMins = $state<number | null>(null);
+
+	let heartbeatClass = $derived(
+		heartbeatMins === null ? '' : heartbeatMins < 120 ? 'hb--ok' : heartbeatMins < 720 ? 'hb--warn' : 'hb--stale',
+	);
 
 	function parseSources(raw: string | null): Record<GraphSource, boolean> {
 		const enabled: Record<GraphSource, boolean> = { note: true, vault: true, action: true };
@@ -115,6 +120,7 @@
 		const hb = await getHeartbeatStatus();
 		if (hb?.timestamp) {
 			const mins = Math.round((Date.now() - new Date(hb.timestamp).getTime()) / 60000);
+			heartbeatMins = mins;
 			heartbeatAge = mins < 60 ? `${mins}m` : `${Math.round(mins / 60)}h`;
 		}
 	}
@@ -133,12 +139,16 @@
 		goto(qs ? `/brain?${qs}` : '/brain', { replaceState: true, keepFocus: true, noScroll: true });
 	}
 
-	// URL → state, for in-app links like the panel's OPEN IN EDITOR (?note=N).
+	// URL → state, for in-app navigation: the panel's OPEN IN EDITOR (?note=N)
+	// and the Ctrl+K palette (?item=source:ref) while already on this page.
 	$effect(() => {
-		const noteParam = $page.url.searchParams.get('note');
-		if (noteParam && selectedItem?.id !== `note:${noteParam}`) {
-			selectedItem = itemFromId(`note:${noteParam}`);
-			view = 'list';
+		const params = $page.url.searchParams;
+		const noteParam = params.get('note');
+		const itemParam = noteParam ? `note:${noteParam}` : params.get('item');
+		if (itemParam && selectedItem?.id !== itemParam) {
+			selectedItem = itemFromId(itemParam);
+			if (selectedItem?.source === 'note') view = 'list';
+			loadItems(); // placeholder may need metadata from a fresh list
 			syncUrl();
 		}
 	});
@@ -219,7 +229,7 @@
 	<!-- Toolbar: search · source filters · view toggle · insights · vault strip -->
 	<div class="toolbar">
 		<div class="search-box">
-			<BorgInput bind:value={query} placeholder="Search everything…" />
+			<BorgInput bind:value={query} placeholder="Search everything… (Ctrl+K anywhere)" />
 		</div>
 
 		<div class="filters">
@@ -267,10 +277,10 @@
 		</button>
 
 		<div class="vault-strip">
-			{#if draftCount !== null}<span>drafts {draftCount}</span>{/if}
-			{#if habitsDone}<span>habits {habitsDone[0]}/{habitsDone[1]}</span>{/if}
-			{#if heartbeatAge}<span>♥ {heartbeatAge} ago</span>{/if}
-			<a href="/brain/vault">VAULT OPS →</a>
+			{#if draftCount !== null}<span title="Active drafts awaiting review">drafts {draftCount}</span>{/if}
+			{#if habitsDone}<span title="Today's habit pillars checked">habits {habitsDone[0]}/{habitsDone[1]}</span>{/if}
+			{#if heartbeatAge}<span class={heartbeatClass} title="Time since last heartbeat run">♥ {heartbeatAge} ago</span>{/if}
+			<a href="/brain/vault" title="Drafts, habits, RAG search, heartbeat">VAULT OPS →</a>
 		</div>
 	</div>
 
@@ -513,6 +523,18 @@
 
 	.vault-strip a:hover {
 		border-color: var(--borg-cyan);
+	}
+
+	.hb--ok {
+		color: var(--borg-green);
+	}
+
+	.hb--warn {
+		color: var(--borg-amber);
+	}
+
+	.hb--stale {
+		color: var(--borg-red);
 	}
 
 	/* List view */

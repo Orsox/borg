@@ -9,6 +9,7 @@
 	import BorgStatusBar from '$lib/components/BorgStatusBar.svelte';
 	import BorgToast from '$lib/components/BorgToast.svelte';
 	import HexLoader from '$lib/components/HexLoader.svelte';
+	import CommandPalette from '$lib/components/CommandPalette.svelte';
 
 	let { children } = $props();
 
@@ -63,6 +64,7 @@
 			</main>
 		</div>
 	</div>
+	<CommandPalette />
 {/if}
 
 <BorgToast />

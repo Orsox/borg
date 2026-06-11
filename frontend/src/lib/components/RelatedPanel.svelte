@@ -42,6 +42,31 @@
 			relations.related.length === 0,
 	);
 
+	// ── Mini-graph: the item and its neighborhood on a radial layout ──────────
+	const MINI_W = 248;
+	const MINI_H = 170;
+	const MINI_R = 62;
+	const MINI_MAX = 10;
+
+	let centerColor = $derived(sourceColor[itemId.split(':')[0] as keyof typeof sourceColor] ?? 'var(--borg-cyan)');
+
+	let miniNodes = $derived.by(() => {
+		if (!relations) return [];
+		const neighbors = [
+			...relations.links.map((item) => ({ item, dashed: false })),
+			...relations.backlinks.map((item) => ({ item, dashed: false })),
+			...relations.related.map((item) => ({ item, dashed: true })),
+		].slice(0, MINI_MAX);
+		return neighbors.map((n, i) => {
+			const angle = (2 * Math.PI * i) / neighbors.length - Math.PI / 2;
+			return {
+				...n,
+				x: MINI_W / 2 + MINI_R * Math.cos(angle),
+				y: MINI_H / 2 + MINI_R * Math.sin(angle),
+			};
+		});
+	});
+
 	const sections: { key: 'links' | 'backlinks' | 'related'; label: string; hint: string }[] = [
 		{ key: 'links', label: 'LINKS →', hint: 'wiki-links from this item' },
 		{ key: 'backlinks', label: '← BACKLINKS', hint: 'items linking here' },
@@ -61,6 +86,56 @@
 			No connections yet. Link with [[Title]] — vault notes resolve too — or share a tag.
 		</p>
 	{:else if relations}
+		{#if miniNodes.length > 0}
+			<div class="mini-graph-wrap">
+				<svg
+					class="mini-graph"
+					width={MINI_W}
+					height={MINI_H}
+					viewBox={`0 0 ${MINI_W} ${MINI_H}`}
+					role="img"
+					aria-label="Connection neighborhood"
+				>
+					{#each miniNodes as n (n.item.id)}
+						<line
+							x1={MINI_W / 2}
+							y1={MINI_H / 2}
+							x2={n.x}
+							y2={n.y}
+							class="mini-edge"
+							stroke-dasharray={n.dashed ? '3 3' : undefined}
+						/>
+					{/each}
+
+					<circle
+						cx={MINI_W / 2}
+						cy={MINI_H / 2}
+						r="9"
+						fill="var(--borg-void)"
+						stroke={centerColor}
+						stroke-width="2.5"
+					/>
+
+					{#each miniNodes as n (n.item.id)}
+						<g
+							class="mini-node"
+							role="button"
+							tabindex="-1"
+							onclick={() => onnavigate(n.item)}
+							onkeydown={(ev) => ev.key === 'Enter' && onnavigate(n.item)}
+						>
+							<circle cx={n.x} cy={n.y} r="6" fill="var(--borg-void)" stroke={sourceColor[n.item.source]} stroke-width="1.5">
+								<title>{n.item.title}</title>
+							</circle>
+							<text class="mini-label" x={n.x} y={n.y + 16} text-anchor="middle">
+								{n.item.title.length > 11 ? n.item.title.slice(0, 11) + '…' : n.item.title}
+							</text>
+						</g>
+					{/each}
+				</svg>
+			</div>
+		{/if}
+
 		{#each sections as section}
 			{@const items = relations[section.key] as RelatedItem[]}
 			{#if items.length > 0}
@@ -114,6 +189,36 @@
 
 	.related-status--error {
 		color: var(--borg-red);
+	}
+
+	.mini-graph-wrap {
+		display: flex;
+		justify-content: center;
+		padding: 8px 0 4px;
+		border-bottom: 1px solid var(--borg-border);
+	}
+
+	.mini-edge {
+		stroke: var(--borg-cyan);
+		stroke-width: 1;
+		stroke-opacity: 0.3;
+	}
+
+	.mini-node {
+		cursor: pointer;
+	}
+
+	.mini-node:hover circle {
+		stroke-width: 3;
+		filter: drop-shadow(0 0 5px currentColor);
+	}
+
+	.mini-label {
+		font-size: 8px;
+		font-family: 'JetBrains Mono', monospace;
+		fill: var(--borg-text-secondary);
+		pointer-events: none;
+		user-select: none;
 	}
 
 	.related-section {
