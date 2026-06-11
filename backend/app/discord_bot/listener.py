@@ -46,7 +46,11 @@ def _format_dreaming_event(event_dict: dict) -> Optional[str]:
         )
     if "notes_created" in event_dict:
         n = event_dict["notes_created"]
-        return f"✓ Dreaming-Zyklus #{run_id} abgeschlossen — {n} Notiz(en) erstellt."
+        msg = f"✓ Dreaming-Zyklus #{run_id} abgeschlossen — {n} Notiz(en) erstellt."
+        title = event_dict.get("note_title")
+        if title:
+            msg += f" Traumtagebuch: „{title}“."
+        return msg
     reason = event_dict.get("reason")
     return (
         f"ℹ Dreaming-Zyklus #{run_id} übersprungen — {reason}."
@@ -107,7 +111,9 @@ class TaskEventListener:
         Args:
             notification_callback: Async-Funktion die aufgerufen wird
                                    wenn eine Notification gesendet werden soll.
-                                   Signatur: async (content: str) -> None
+                                   Signatur: async (content: str, persona: str | None) -> None —
+                                   persona (z.B. "locutus", "seven") bestimmt,
+                                   welcher Persona-Bot die Notification verkündet.
         """
         self._callback = notification_callback
         self._running = False
@@ -154,26 +160,27 @@ class TaskEventListener:
         """
         try:
             event_type = event_dict.get("type", "")
+            persona = event_dict.get("persona")
 
             if event_type in DREAMING_EVENT_TYPES:
                 formatted = _format_dreaming_event(event_dict)
                 if formatted:
                     logger.info(f"Dreaming notification: {formatted}")
-                    await self._callback(formatted)
+                    await self._callback(formatted, persona)
                 return
 
             if event_type in GAP_ANALYSIS_EVENT_TYPES:
                 formatted = _format_gap_analysis_event(event_dict)
                 if formatted:
                     logger.info(f"Gap analysis notification: {formatted}")
-                    await self._callback(formatted)
+                    await self._callback(formatted, persona)
                 return
 
             if event_type in SKILL_CREATION_EVENT_TYPES:
                 formatted = _format_skill_creation_event(event_dict)
                 if formatted:
                     logger.info(f"Skill creation notification: {formatted}")
-                    await self._callback(formatted)
+                    await self._callback(formatted, persona)
                 return
 
             if event_type not in (
@@ -189,7 +196,7 @@ class TaskEventListener:
             formatted = notification.format()
 
             logger.info(f"Task notification: {formatted}")
-            await self._callback(formatted)
+            await self._callback(formatted, event.persona)
 
         except Exception as e:
             logger.error(f"Error processing event: {e}")

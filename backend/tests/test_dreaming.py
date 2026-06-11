@@ -151,6 +151,87 @@ async def test_run_dreaming_cycle_skips_when_insufficient_actions():
     assert result["status"] == "skipped"
 
 
+@pytest.mark.asyncio
+async def test_manual_trigger_events_carry_persona():
+    """Regression: run_task_now/_execute_task_now emittierten Task-Events ohne
+    persona-Feld — Locutus verkündete Sevens Dreaming-Task statt Seven selbst."""
+    import asyncio
+
+    from app.task_automation.models import Task
+    from app.task_automation.scheduler import sse_queue
+    from app.task_automation.service import run_task_now
+
+    # Queue leeren — andere Tests/Setup können Events hinterlassen haben
+    while not sse_queue.empty():
+        sse_queue.get_nowait()
+
+    async with AsyncSessionLocal() as db:
+        task = Task(
+            name="Seven of Nine Dreaming Consolidation",
+            task_type="dreaming",
+            dreaming_days=14,
+            dreaming_min_actions=5,
+            dreaming_persona="seven",
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+        run_id = await run_task_now(db, task.id)
+
+    assert run_id is not None
+
+    # task_run_started (sofort) + task_run_completed (Hintergrund) einsammeln
+    events = {}
+    for _ in range(10):
+        try:
+            event = await asyncio.wait_for(sse_queue.get(), timeout=5.0)
+        except asyncio.TimeoutError:
+            break
+        if event.get("type", "").startswith("task_run_"):
+            events[event["type"]] = event
+        if "task_run_completed" in events or "task_run_failed" in events:
+            break
+
+    assert events["task_run_started"]["persona"] == "seven"
+    done = events.get("task_run_completed") or events.get("task_run_failed")
+    assert done is not None
+    assert done["persona"] == "seven"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_dreaming_task_does_not_self_deadlock():
+    """Regression: _execute_task hielt eine offene Schreibtransaktion (TaskRun-
+    INSERT nur geflusht, nicht committed), während der Dreaming-Zyklus in einer
+    zweiten Session schreiben wollte — SQLite-Single-Writer-Self-Deadlock,
+    jeder geplante Lauf endete mit "database is locked"."""
+    from app.task_automation.models import Task, TaskRun
+    from app.task_automation.scheduler import _execute_task
+
+    async with AsyncSessionLocal() as db:
+        task = Task(
+            name="Seven of Nine Dreaming Consolidation",
+            task_type="dreaming",
+            dreaming_days=14,
+            dreaming_min_actions=5,
+            dreaming_persona="seven",
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+        task_id = task.id
+
+    await _execute_task(task_id)
+
+    async with AsyncSessionLocal() as db:
+        run = (
+            await db.execute(select(TaskRun).where(TaskRun.task_id == task_id))
+        ).scalars().first()
+
+    assert run is not None
+    assert run.status == "success"
+    assert "database is locked" not in (run.stderr or "")
+
+
 class TestTranslateDreamingConfig:
     """Tests for the human-friendly dreaming config translator."""
 

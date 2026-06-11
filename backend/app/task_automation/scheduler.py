@@ -123,10 +123,13 @@ async def _execute_task(task_id: int) -> None:
             logger.error(f"Task {task_id} not found")
             return
 
-        # Create run record
+        # Create run record — committed sofort: Dreaming-Tasks öffnen eine
+        # eigene Session auf derselben SQLite-Datei; eine hier offen gehaltene
+        # Schreibtransaktion würde deren INSERTs blockieren (Single-Writer →
+        # Self-Deadlock, "database is locked" bis zum busy_timeout).
         run = TaskRun(task_id=task_id, status="running")
         db.add(run)
-        await db.flush()
+        await db.commit()
         await db.refresh(run)
 
         # Notify SSE
@@ -144,6 +147,7 @@ async def _execute_task(task_id: int) -> None:
                 "task_id": task_id,
                 "task_name": task.name,
                 "run_id": run.id,
+                "persona": task.dreaming_persona,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
 
@@ -203,6 +207,8 @@ async def _execute_task(task_id: int) -> None:
                     "run_id": run.id,
                     "status": run.status,
                     "duration_ms": duration_ms,
+                    "persona": task.dreaming_persona,
+                    "error": (stderr or stdout)[:300] if exit_code != 0 else None,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
 
@@ -218,6 +224,7 @@ async def _execute_task(task_id: int) -> None:
                 "task_id": task_id,
                 "task_name": task.name,
                 "run_id": run.id,
+                "persona": task.dreaming_persona,
                 "error": str(e),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })

@@ -69,6 +69,9 @@ class TaskEvent(BaseModel):
     status: Optional[str] = None
     duration_ms: Optional[int] = None
     error: Optional[str] = None
+    # Persona, in deren Namen das Event gemeldet wird (z.B. "locutus",
+    # "seven" bei Dreaming-Tasks) — bestimmt, welcher Bot es verkündet.
+    persona: Optional[str] = None
 
 
 class TaskNotification(BaseModel):

@@ -244,6 +244,7 @@ async def run_dreaming_cycle(
         "run_id": run.id,
         "days": days,
         "min_actions": min_actions,
+        "persona": persona,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
 
@@ -270,6 +271,7 @@ async def run_dreaming_cycle(
                 "run_id": run.id,
                 "status": run.status,
                 "reason": run.summary,
+                "persona": persona,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
             await db.commit()
@@ -294,6 +296,8 @@ async def run_dreaming_cycle(
             "run_id": run.id,
             "status": run.status,
             "notes_created": run.notes_created,
+            "note_title": note.title if note else None,
+            "persona": persona,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
         await db.commit()
@@ -314,6 +318,7 @@ async def run_dreaming_cycle(
                     "type": "gap_analysis_completed",
                     "run_id": run.id,
                     "proposals": new_proposals,
+                    "persona": persona,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
         except Exception:
@@ -338,6 +343,7 @@ async def run_dreaming_cycle(
             "run_id": run.id,
             "status": run.status,
             "error": str(e),
+            "persona": persona,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
         await db.commit()

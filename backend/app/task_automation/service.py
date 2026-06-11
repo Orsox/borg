@@ -223,6 +223,7 @@ async def run_task_now(db: AsyncSession, task_id: int) -> int | None:
             "task_id": task_id,
             "task_name": task.name,
             "run_id": run.id,
+            "persona": task.dreaming_persona,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
     
@@ -316,6 +317,8 @@ async def _execute_task_now(task_id: int, run_id: int) -> None:
                     "run_id": run_id,
                     "status": run.status,
                     "duration_ms": duration_ms,
+                    "persona": task.dreaming_persona,
+                    "error": (stderr or stdout)[:300] if exit_code != 0 else None,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
         except Exception as e:

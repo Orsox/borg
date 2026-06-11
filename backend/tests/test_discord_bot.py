@@ -449,7 +449,7 @@ class TestTaskEventListener:
 
         callback_called = False
 
-        async def mock_callback(content: str) -> None:
+        async def mock_callback(content: str, persona: str | None = None) -> None:
             nonlocal callback_called
             callback_called = True
 
@@ -468,7 +468,7 @@ class TestTaskEventListener:
 
         received = []
 
-        async def mock_callback(content: str) -> None:
+        async def mock_callback(content: str, persona: str | None = None) -> None:
             received.append(content)
 
         listener = TaskEventListener(mock_callback)
@@ -497,7 +497,7 @@ class TestTaskEventListener:
 
         received = []
 
-        async def mock_callback(content: str) -> None:
+        async def mock_callback(content: str, persona: str | None = None) -> None:
             received.append(content)
 
         listener = TaskEventListener(mock_callback)
@@ -526,7 +526,7 @@ class TestTaskEventListener:
 
         received = []
 
-        async def mock_callback(content: str) -> None:
+        async def mock_callback(content: str, persona: str | None = None) -> None:
             received.append(content)
 
         listener = TaskEventListener(mock_callback)
@@ -555,7 +555,7 @@ class TestTaskEventListener:
 
         received = []
 
-        async def mock_callback(content: str) -> None:
+        async def mock_callback(content: str, persona: str | None = None) -> None:
             received.append(content)
 
         listener = TaskEventListener(mock_callback)
@@ -583,7 +583,7 @@ class TestTaskEventListener:
 
         received = []
 
-        async def mock_callback(content: str) -> None:
+        async def mock_callback(content: str, persona: str | None = None) -> None:
             received.append(content)
 
         listener = TaskEventListener(mock_callback)
@@ -612,7 +612,7 @@ class TestTaskEventListener:
 
         received = []
 
-        async def mock_callback(content: str) -> None:
+        async def mock_callback(content: str, persona: str | None = None) -> None:
             received.append(content)
 
         listener = TaskEventListener(mock_callback)
@@ -640,7 +640,7 @@ class TestTaskEventListener:
 
         received = []
 
-        async def mock_callback(content: str) -> None:
+        async def mock_callback(content: str, persona: str | None = None) -> None:
             received.append(content)
 
         listener = TaskEventListener(mock_callback)
@@ -669,7 +669,7 @@ class TestTaskEventListener:
 
         received = []
 
-        async def mock_callback(content: str) -> None:
+        async def mock_callback(content: str, persona: str | None = None) -> None:
             received.append(content)
 
         listener = TaskEventListener(mock_callback)
@@ -688,6 +688,84 @@ class TestTaskEventListener:
 
         await listener.stop()
 
+    @pytest.mark.asyncio
+    async def test_listener_passes_persona_for_task_events(self):
+        """Test: Persona aus Task-Events erreicht den Callback (Routing-Grundlage)."""
+        from app.discord_bot.listener import TaskEventListener
+        from app.discord_bot.models import TaskEventType
+
+        received = []
+
+        async def mock_callback(content: str, persona: str | None = None) -> None:
+            received.append((content, persona))
+
+        listener = TaskEventListener(mock_callback)
+
+        event = {
+            "type": TaskEventType.TASK_FAILED.value,
+            "task_id": 2,
+            "task_name": "Seven of Nine Dreaming Consolidation",
+            "run_id": 6,
+            "persona": "seven",
+            "error": "database is locked",
+            "timestamp": "2026-06-11T04:01:00Z",
+        }
+        await listener._process_event(event)
+
+        assert len(received) == 1
+        assert received[0][1] == "seven"
+        assert "database is locked" in received[0][0]
+
+    @pytest.mark.asyncio
+    async def test_listener_passes_persona_for_dreaming_events(self):
+        """Test: Persona aus Dreaming-Events erreicht den Callback."""
+        from app.discord_bot.listener import TaskEventListener
+
+        received = []
+
+        async def mock_callback(content: str, persona: str | None = None) -> None:
+            received.append((content, persona))
+
+        listener = TaskEventListener(mock_callback)
+
+        event = {
+            "type": "dreaming_run_started",
+            "run_id": 9,
+            "days": 14,
+            "min_actions": 5,
+            "persona": "seven",
+            "timestamp": "2026-06-11T04:00:00Z",
+        }
+        await listener._process_event(event)
+
+        assert len(received) == 1
+        assert received[0][1] == "seven"
+
+    @pytest.mark.asyncio
+    async def test_listener_persona_defaults_to_none(self):
+        """Test: Events ohne Persona-Feld liefern persona=None (→ Locutus-Default)."""
+        from app.discord_bot.listener import TaskEventListener
+        from app.discord_bot.models import TaskEventType
+
+        received = []
+
+        async def mock_callback(content: str, persona: str | None = None) -> None:
+            received.append((content, persona))
+
+        listener = TaskEventListener(mock_callback)
+
+        event = {
+            "type": TaskEventType.TASK_STARTED.value,
+            "task_id": 1,
+            "task_name": "irgendein-task",
+            "run_id": 1,
+            "timestamp": "2026-06-11T04:00:00Z",
+        }
+        await listener._process_event(event)
+
+        assert len(received) == 1
+        assert received[0][1] is None
+
 
 class TestNotificationCallbackFlow:
     """Tests für den Notification-Callback-Flow (SSE → Listener → Discord)."""
@@ -700,7 +778,7 @@ class TestNotificationCallbackFlow:
 
         received_contents = []
 
-        async def mock_callback(content: str) -> None:
+        async def mock_callback(content: str, persona: str | None = None) -> None:
             received_contents.append(content)
 
         listener = TaskEventListener(mock_callback)
@@ -1586,6 +1664,262 @@ class TestResolveAddressee:
         # Channel 1 bleibt bei Seven, Channel 2 bei Locutus
         assert await service.resolve_addressee(1, "Und weiter?") == PERSONA_SEVEN
         assert await service.resolve_addressee(2, "Und weiter?") == PERSONA_LOCUTUS
+
+
+class TestBotDialogueBudget:
+    """Tests für das Persona-zu-Persona-Turn-Budget (Endlosschleifen-Schutz)."""
+
+    def _make_service(self):
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+
+        return DiscordBotService(BotConfig(enabled=True, token="test-token"))
+
+    @pytest.mark.asyncio
+    async def test_budget_allows_up_to_max_turns_then_blocks(self):
+        from app.discord_bot.service import BOT_DIALOGUE_MAX_TURNS
+
+        service = self._make_service()
+
+        for _ in range(BOT_DIALOGUE_MAX_TURNS):
+            assert await service.register_bot_dialogue_turn(1) is True
+        assert await service.register_bot_dialogue_turn(1) is False
+
+    @pytest.mark.asyncio
+    async def test_human_message_resets_budget(self):
+        from app.discord_bot.service import BOT_DIALOGUE_MAX_TURNS
+
+        service = self._make_service()
+
+        for _ in range(BOT_DIALOGUE_MAX_TURNS):
+            await service.register_bot_dialogue_turn(1)
+        assert await service.register_bot_dialogue_turn(1) is False
+
+        await service.reset_bot_dialogue(1)
+        assert await service.register_bot_dialogue_turn(1) is True
+
+    @pytest.mark.asyncio
+    async def test_budget_is_per_channel(self):
+        from app.discord_bot.service import BOT_DIALOGUE_MAX_TURNS
+
+        service = self._make_service()
+
+        for _ in range(BOT_DIALOGUE_MAX_TURNS):
+            await service.register_bot_dialogue_turn(1)
+        assert await service.register_bot_dialogue_turn(1) is False
+        # Anderer Channel hat sein eigenes Budget
+        assert await service.register_bot_dialogue_turn(2) is True
+
+
+class TestPersonaPeerChat:
+    """Tests für from_peer-Chat: Dialog-Kontext statt Direktiven-Verarbeitung."""
+
+    def _make_service(self):
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+
+        return DiscordBotService(BotConfig(enabled=True, token="test-token"))
+
+    def test_prompts_introduce_the_other_persona(self):
+        from app.discord_bot.service import LOCUTUS_SYSTEM_PROMPT, SEVEN_SYSTEM_PROMPT
+
+        assert "Seven of Nine" in LOCUTUS_SYSTEM_PROMPT
+        assert "Locutus" in SEVEN_SYSTEM_PROMPT
+
+    @pytest.mark.asyncio
+    async def test_locutus_peer_chat_adds_dialogue_context_and_disarms_memory(self):
+        from unittest.mock import AsyncMock, patch
+
+        from app.discord_bot.llm import LlmClient
+        from app.locutus import service as locutus_service
+
+        service = self._make_service()
+        await service.start()
+
+        try:
+            with patch.object(
+                LlmClient,
+                "chat",
+                new_callable=AsyncMock,
+                return_value="[MEMORY: Seven mag Effizienz]\nVerstanden, Seven.",
+            ) as mock_chat, patch.object(
+                locutus_service, "create_character_memory", new_callable=AsyncMock
+            ) as mock_create:
+                response = await service.chat("Locutus, Statusbericht.", user_id=999, from_peer=True)
+
+                system_prompt = mock_chat.call_args.args[1]
+                assert "stammt NICHT von Orsox" in system_prompt
+                # Direktive entschärft: kein Memory-Write, Marker entfernt
+                mock_create.assert_not_called()
+                assert response.content == "Verstanden, Seven."
+        finally:
+            await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_seven_peer_chat_does_not_start_agent_runs(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from app.discord_bot.llm import LlmClient
+
+        service = self._make_service()
+        await service.start()
+
+        try:
+            with patch.object(
+                LlmClient,
+                "chat",
+                new_callable=AsyncMock,
+                return_value="[AGENT: analysiere das Repo]\nIch begebe mich ins Astrometrie-Labor.",
+            ) as mock_chat, patch.object(
+                service, "_schedule_agent_run", new=MagicMock()
+            ) as mock_schedule:
+                response = await service.chat_as_seven("Seven, prüfe das bitte.", user_id=998, from_peer=True)
+
+                system_prompt = mock_chat.call_args.args[1]
+                assert "stammt NICHT von Orsox" in system_prompt
+                mock_schedule.assert_not_called()
+                assert response.content == "Ich begebe mich ins Astrometrie-Labor."
+        finally:
+            await service.stop()
+
+
+class TestBotClientPeerMessages:
+    """Tests für on_message mit Nachrichten der Partner-Persona."""
+
+    def _make_client(self, persona_key: str = "locutus"):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from app.discord_bot.bot import BotClient
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.models import Response
+        from app.discord_bot.service import DiscordBotService
+
+        config = BotConfig(enabled=True, token="test-token")
+        service = DiscordBotService(config)
+        chat_fn = AsyncMock(return_value=Response(content="ok"))
+        client = BotClient(
+            config=config,
+            service=service,
+            persona_name="Locutus",
+            persona_key=persona_key,
+            chat_fn=chat_fn,
+        )
+        # Partner-Persona: nur user.id wird in _is_peer_message gelesen
+        peer = MagicMock()
+        peer.user.id = 999
+        client.set_peer(peer)
+        return client, service, chat_fn
+
+    def _make_message(self, content: str, author_id: int, is_bot: bool, channel_id: int = 456):
+        from unittest.mock import AsyncMock, MagicMock
+
+        import discord
+
+        # spec, damit _safe_reply den isinstance(message, discord.Message)-Zweig nimmt
+        message = MagicMock(spec=discord.Message)
+        message.content = content
+        message.author.id = author_id
+        message.author.bot = is_bot
+        message.channel.id = channel_id
+        message.reply = AsyncMock()
+        return message
+
+    @pytest.mark.asyncio
+    async def test_peer_message_addressed_by_name_triggers_peer_chat(self):
+        client, _service, chat_fn = self._make_client(persona_key="locutus")
+        message = self._make_message("Locutus, Statusbericht.", author_id=999, is_bot=True)
+
+        await client.on_message(message)
+
+        chat_fn.assert_awaited_once_with("Locutus, Statusbericht.", 999, from_peer=True)
+        message.reply.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_peer_message_without_addressing_is_ignored(self):
+        client, _service, chat_fn = self._make_client(persona_key="locutus")
+        message = self._make_message("Analyse abgeschlossen.", author_id=999, is_bot=True)
+
+        await client.on_message(message)
+
+        chat_fn.assert_not_awaited()
+        message.reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_foreign_bot_message_is_ignored_even_with_name(self):
+        client, _service, chat_fn = self._make_client(persona_key="locutus")
+        # Bot, aber nicht die Partner-Persona (ID 888 statt 999)
+        message = self._make_message("Locutus, hallo!", author_id=888, is_bot=True)
+
+        await client.on_message(message)
+
+        chat_fn.assert_not_awaited()
+        message.reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_peer_message_blocked_when_budget_exhausted(self):
+        from app.discord_bot.service import BOT_DIALOGUE_MAX_TURNS
+
+        client, service, chat_fn = self._make_client(persona_key="locutus")
+        service._bot_dialogue_turns[456] = BOT_DIALOGUE_MAX_TURNS
+        message = self._make_message("Locutus, weiter im Text.", author_id=999, is_bot=True)
+
+        await client.on_message(message)
+
+        chat_fn.assert_not_awaited()
+        message.reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_human_message_resets_dialogue_budget(self):
+        client, service, chat_fn = self._make_client(persona_key="locutus")
+        service._bot_dialogue_turns[456] = 4
+        # Menschliche Nachricht ohne Adressierung — Budget wird trotzdem zurückgesetzt
+        message = self._make_message("nur eine Randbemerkung", author_id=123, is_bot=False)
+
+        await client.on_message(message)
+
+        assert 456 not in service._bot_dialogue_turns
+
+    @pytest.mark.asyncio
+    async def test_peer_notification_is_ignored_even_with_name(self):
+        """System-Notifications der Partner-Persona ("Task Locutus ... gestartet.")
+        sind keine Gesprächsbeiträge — keine Antwort, auch bei Namensnennung."""
+        client, service, chat_fn = self._make_client(persona_key="locutus")
+        message = self._make_message(
+            "▶ Task `Locutus Dreaming Consolidation` (#5) gestartet.",
+            author_id=999,
+            is_bot=True,
+        )
+        message.id = 777
+        service.register_notification_message(777)
+
+        await client.on_message(message)
+
+        chat_fn.assert_not_awaited()
+        message.reply.assert_not_awaited()
+
+
+class TestNotificationMessageRegistry:
+    """Tests für die Registry gesendeter System-Notifications."""
+
+    def _make_service(self):
+        from app.discord_bot.config import BotConfig
+        from app.discord_bot.service import DiscordBotService
+
+        return DiscordBotService(BotConfig(enabled=True, token="test-token"))
+
+    def test_registered_message_is_recognized(self):
+        service = self._make_service()
+        service.register_notification_message(42)
+        assert service.is_notification_message(42) is True
+        assert service.is_notification_message(43) is False
+
+    def test_registry_is_bounded(self):
+        service = self._make_service()
+        for i in range(500):
+            service.register_notification_message(i)
+        # Älteste Einträge fallen raus, jüngste bleiben
+        assert service.is_notification_message(0) is False
+        assert service.is_notification_message(499) is True
 
 
 class TestServiceStatus:
