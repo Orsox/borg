@@ -101,6 +101,15 @@ Optional, **off by default** — the app must behave identically without it (tes
 - **Apply** is manual per item: accepting writes the remote version to the local `ARCHON_PATH` (+ re-scan) or upserts the `Skill` via `skills.service`. Per-peer outbound tokens live on `PeerInstance.token`; this instance's own offered token is `PEER_SYNC_TOKEN`.
 - Borg-themed review UI at `/sync` (`routes/sync/`, client `lib/api/peerSync.ts`): register peers, run the diff, trigger Seven's comparison, accept/reject each item with a side-by-side content view.
 
+### Conference Room (Meeting)
+
+`meeting/` (`/api/meeting`) is a web roundtable where the personas (Locutus, Seven) discuss a theme Orsox sets, taking turns round-robin for a chosen number of rounds. A separate surface from the Discord bot, reusing the same system prompts (`discord_bot/service.py`) and LM Studio clients (`discord_bot/llm.py::LlmClient`).
+
+- **Ephemeral, in-memory** — `MeetingService` (`orchestrator.py`) keeps sessions in a dict; a backend restart clears them (same philosophy as the in-memory chat histories). No DB.
+- Each meeting runs as a **background asyncio task** that appends turns to the session as they complete; `session.speaking` marks the persona whose turn is in flight. The frontend **polls** `GET /api/meeting/sessions/{id}` (~1.2s) — no SSE/streaming anywhere in the app.
+- **Extensible participant registry** (`personas.py`), ordered = round-robin order; seeded with the two existing personas (add a third = one entry). Directive markers (`[MEMORY:`/`[AGENT:`/`[GITLAB_REPO:`) are stripped inside a meeting — no side effects.
+- Borg-themed conference room at `/meeting` (`routes/meeting/`, client `lib/api/meeting.ts`): animated character stations light up for the active speaker, live transcript, and a `/meeting <rounds> <theme>` codeword input (jede Runde = jeder Charakter spricht einmal).
+
 ### Vault integration
 
 `vault/` module scans `~/Memory/` (Obsidian vault) using `python-frontmatter`. Parses YAML frontmatter + extracts `[[wiki-links]]` for graph rendering. Read-only — never writes to vault.

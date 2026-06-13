@@ -8,6 +8,7 @@
 		{ href: '/archon', label: 'Archon Hub', icon: '◈' },
 		{ href: '/brain', label: 'Second Brain', icon: '◉' },
 		{ href: '/tasks', label: 'Task Automation', icon: '◆' },
+		{ href: '/meeting', label: 'Conference', icon: '◇' },
 		{ href: '/observability', label: 'Observability', icon: '◎' },
 		{ href: '/sync', label: 'Peer Sync', icon: '⇄' },
 		{ href: '/settings', label: 'Settings', icon: '⚙' },

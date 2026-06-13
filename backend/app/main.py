@@ -46,6 +46,8 @@ from app.peer_sync.router import router as peer_sync_router
 from app.peer_sync.peer_router import router as peer_router
 from app.discord_bot.config import BotConfig
 from app.discord_bot.service import DiscordBotService, PERSONA_LOCUTUS, PERSONA_SEVEN
+from app.meeting.orchestrator import MeetingService
+from app.meeting.router import router as meeting_router, set_meeting_service
 from app.discord_bot.listener import TaskEventListener
 from app.discord_bot.bot import BotClient
 from app.database import Base, AsyncSessionLocal, engine
@@ -73,6 +75,7 @@ _bot_client: BotClient | None = None
 _bot_task: asyncio.Task | None = None
 _seven_bot_client: BotClient | None = None
 _seven_bot_task: asyncio.Task | None = None
+_meeting_service: MeetingService | None = None
 
 
 async def _connect_persona_bot(
@@ -361,6 +364,17 @@ async def lifespan(app: FastAPI):
     # Initialize Discord Bot (Locutus)
     await _init_discord_bot()
 
+    # Initialize the conference-room meeting service (separate surface, reuses
+    # the same persona prompts + LM Studio clients). Independent of whether the
+    # Discord bots are enabled.
+    global _meeting_service
+    try:
+        _meeting_service = MeetingService(BotConfig.from_env_locutus())
+        await _meeting_service.start()
+        set_meeting_service(_meeting_service)
+    except Exception:
+        logger.exception("Failed to initialize MeetingService")
+
     yield
 
     # Shutdown scheduler
@@ -369,6 +383,9 @@ async def lifespan(app: FastAPI):
 
     # Shutdown Discord Bot
     await _shutdown_discord_bot()
+
+    if _meeting_service:
+        await _meeting_service.stop()
 
     # Flush buffered Langfuse traces (no-op when tracing is disabled)
     from app.shared import tracing
@@ -414,6 +431,7 @@ app.include_router(agent_sandbox_router)
 app.include_router(observability_router)
 app.include_router(peer_sync_router)
 app.include_router(peer_router)
+app.include_router(meeting_router)
 
 
 @app.get("/api/health")
