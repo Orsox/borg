@@ -14,6 +14,7 @@ from app.config import settings
 class LlmConfig(BaseModel):
     """LM Studio Konfiguration für KI-Chat."""
 
+    persona: str = Field(default="", description="Persona-Label für Tracing (locutus/seven)")
     base_url: str = Field(default="http://localhost:1234/v1", description="LM Studio API URL")
     model_id: str = Field(default="mellum2-12b-a2.5b-instruct", description="Modell-ID")
     context_window: int = Field(default=131072, description="Context Window in Tokens")
@@ -54,10 +55,12 @@ class BotConfig(BaseModel):
             prefix=settings.discord_bot_locutus_prefix,
             mention_prefix=settings.discord_bot_locutus_mention_prefix,
             llm=LlmConfig(
+                persona="locutus",
                 base_url=settings.discord_bot_locutus_llm_base_url,
                 model_id=settings.discord_bot_locutus_llm_model_id,
             ),
             seven_llm=LlmConfig(
+                persona="seven",
                 base_url=settings.discord_bot_seven_llm_base_url,
                 model_id=settings.discord_bot_seven_llm_model_id,
             ),
@@ -81,6 +84,7 @@ class BotConfig(BaseModel):
             prefix=settings.discord_bot_seven_prefix,
             mention_prefix=settings.discord_bot_seven_mention_prefix,
             llm=LlmConfig(
+                persona="seven",
                 base_url=settings.discord_bot_seven_llm_base_url,
                 model_id=settings.discord_bot_seven_llm_model_id,
             ),

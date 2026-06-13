@@ -1,4 +1,4 @@
-.PHONY: dev backend frontend install test clean sandbox-image
+.PHONY: dev backend frontend install test clean sandbox-image observability-up observability-down
 
 # Install dependencies
 install:
@@ -27,6 +27,17 @@ sandbox-image:
 # Run database migrations
 migrate:
 	cd backend && uv run alembic upgrade head
+
+# Langfuse observability stack (separate compose project, see observability/).
+# Note: borg's own compose declares the observability network as external —
+# if you don't want to run Langfuse, a one-time `docker network create
+# observability_default` is enough to keep `docker compose up` working.
+observability-up:
+	docker network inspect observability_default >/dev/null 2>&1 || docker network create observability_default
+	docker compose -f observability/docker-compose.yml up -d
+
+observability-down:
+	docker compose -f observability/docker-compose.yml down
 
 # Clean build artifacts
 clean:

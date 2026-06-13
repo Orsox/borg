@@ -91,6 +91,18 @@ class Settings(BaseSettings):
         description="Minimum ActionMemory entries required to trigger dreaming",
     )
 
+    # Observability — Langfuse (self-hosted, optional). Default off: the app
+    # must behave identically without Langfuse running (tests, degraded mode).
+    langfuse_enabled: bool = Field(default=False, description="Langfuse-Tracing aktivieren")
+    langfuse_host: str = Field(default="http://langfuse-web:3000", description="Langfuse-Server-URL (vom Backend aus erreichbar)")
+    langfuse_public_key: str = Field(default="", description="Langfuse Project Public Key (pk-lf-...)")
+    langfuse_secret_key: str = Field(default="", description="Langfuse Project Secret Key (sk-lf-...)")
+    langfuse_ui_url: str = Field(default="", description="Öffentliche Langfuse-UI-URL für Links (z.B. http://homelab:3052)")
+    langfuse_project_id: str = Field(default="borg", description="Langfuse-Projekt-ID (Headless-Init in observability/docker-compose.yml)")
+    # LiteLLM-Proxy für Agent Mode: pi's models.json zeigt hierauf, damit jede
+    # LLM-Anfrage aus der Sandbox in Langfuse landet. Leer = direkt zu LM Studio.
+    agent_mode_llm_proxy_url: str = Field(default="", description="LiteLLM-Proxy-URL für pi (leer = direkt zu LM Studio)")
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

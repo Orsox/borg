@@ -28,6 +28,7 @@ from app.locutus import service as locutus_service
 from app.second_brain.models import Note
 from app.second_brain.service import create_note
 from app.seven_of_nine import service as seven_service
+from app.shared import tracing
 
 from .config import BotConfig, LlmConfig
 from .llm import LlmClient, LlmError
@@ -443,7 +444,16 @@ class DiscordBotService:
                 )
 
             messages = [*self._recall_chat_history(PERSONA_LOCUTUS, user_id), {"role": "user", "content": message}]
-            answer = await self._llm_client.chat(messages, system_prompt)
+            with tracing.trace_span(
+                "persona-chat",
+                persona=PERSONA_LOCUTUS,
+                session_id=f"discord-{user_id}",
+                tags=["persona-chat"],
+                metadata={"from_peer": from_peer},
+                input=message,
+            ) as span:
+                answer = await self._llm_client.chat(messages, system_prompt)
+                span.update(output=answer)
 
             if from_peer:
                 answer = _strip_directive_markers(answer)
@@ -556,7 +566,16 @@ class DiscordBotService:
                 )
 
             messages = [*self._recall_chat_history(PERSONA_SEVEN, user_id), {"role": "user", "content": message}]
-            answer = await self._seven_llm_client.chat(messages, system_prompt)
+            with tracing.trace_span(
+                "persona-chat",
+                persona=PERSONA_SEVEN,
+                session_id=f"discord-{user_id}",
+                tags=["persona-chat"],
+                metadata={"from_peer": from_peer},
+                input=message,
+            ) as span:
+                answer = await self._seven_llm_client.chat(messages, system_prompt)
+                span.update(output=answer)
 
             if from_peer:
                 answer = _strip_directive_markers(answer)
@@ -761,9 +780,17 @@ class DiscordBotService:
             "Kein Drumherum. Keine Wiederholung des rohen Outputs — interpretiere ihn."
         )
         try:
-            summary = await self._seven_llm_client.chat(
-                [{"role": "user", "content": raw}], translation_prompt
-            )
+            with tracing.trace_span(
+                "agent-mode-summary",
+                persona=PERSONA_SEVEN,
+                session_id=result["run_id"],
+                tags=["agent-mode"],
+                input=task_description,
+            ) as span:
+                summary = await self._seven_llm_client.chat(
+                    [{"role": "user", "content": raw}], translation_prompt
+                )
+                span.update(output=summary)
             return summary
         except LlmError as e:
             logger.error(f"Agent Mode translation failed: {e}")

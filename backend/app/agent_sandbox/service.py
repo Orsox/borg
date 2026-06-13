@@ -11,6 +11,7 @@ may run.
 
 import asyncio
 import base64
+import json
 import logging
 import re
 import shutil
@@ -25,6 +26,7 @@ from app.config import settings
 from app.locutus.models import SkillRecord
 from app.locutus.service import record_action
 from app.seven_of_nine.service import record_action as record_seven_action
+from app.shared import tracing
 
 logger = logging.getLogger(__name__)
 agent_logger = logging.getLogger("borg.agent")
@@ -374,66 +376,79 @@ async def execute_skill(
     if not skill:
         raise SkillRecordNotFound(f"SkillRecord {skill_id} not found")
 
-    if skill.status != "active":
-        await record_action(
-            db,
-            action="skill_execution",
-            target=str(skill.id),
-            payload_summary=f"rejected — skill status is '{skill.status}', not 'active': {_truncate(command_str, 500)}",
-            result="denied",
-            run_id=run_id,
-        )
-        raise SkillNotActive(
-            f"SkillRecord {skill_id} is '{skill.status}' — only 'active' skills can be executed"
-        )
+    with tracing.trace_span(
+        "skill-execution",
+        persona="locutus",
+        session_id=run_id,
+        tags=["skill-execution"],
+        input={"skill_id": skill_id, "command": command_str},
+    ) as span:
+        if skill.status != "active":
+            await record_action(
+                db,
+                action="skill_execution",
+                target=str(skill.id),
+                payload_summary=f"rejected — skill status is '{skill.status}', not 'active': {_truncate(command_str, 500)}",
+                result="denied",
+                run_id=run_id,
+            )
+            span.update(level="ERROR", status_message=f"rejected — skill status '{skill.status}'")
+            raise SkillNotActive(
+                f"SkillRecord {skill_id} is '{skill.status}' — only 'active' skills can be executed"
+            )
 
-    violation = check_deny_list(command_str)
-    if violation:
-        await record_action(
-            db,
-            action="skill_execution",
-            target=str(skill.id),
-            payload_summary=f"denied — matched deny-list rule '{violation}': {_truncate(command_str, 500)}",
-            result="denied",
-            run_id=run_id,
-        )
-        raise SkillExecutionDenied(f"Command violates deny-list rule '{violation}'")
+        violation = check_deny_list(command_str)
+        if violation:
+            await record_action(
+                db,
+                action="skill_execution",
+                target=str(skill.id),
+                payload_summary=f"denied — matched deny-list rule '{violation}': {_truncate(command_str, 500)}",
+                result="denied",
+                run_id=run_id,
+            )
+            span.update(level="ERROR", status_message=f"deny-list rule '{violation}'")
+            raise SkillExecutionDenied(f"Command violates deny-list rule '{violation}'")
 
-    worktree_path, branch = await _create_worktree(run_id)
-    try:
-        container_name = f"borg-agent-run-{run_id}"
-        argv = build_docker_run_argv(container_name=container_name, worktree_path=worktree_path, command=command)
-        exit_code, stdout, stderr = await _run_subprocess(argv, timeout=600)
-        diff = await _capture_diff(worktree_path)
+        worktree_path, branch = await _create_worktree(run_id)
+        try:
+            container_name = f"borg-agent-run-{run_id}"
+            argv = build_docker_run_argv(container_name=container_name, worktree_path=worktree_path, command=command)
+            exit_code, stdout, stderr = await _run_subprocess(argv, timeout=600)
+            diff = await _capture_diff(worktree_path)
 
-        outcome = "ok" if exit_code == 0 else "error"
-        summary = (
-            f"command={command_str}\n"
-            f"exit_code={exit_code}\n"
-            f"worktree={worktree_path}\n"
-            f"--- stdout ---\n{_truncate(stdout)}\n"
-            f"--- stderr ---\n{_truncate(stderr)}"
-        )
-        await record_action(
-            db,
-            action="skill_execution",
-            target=str(skill.id),
-            payload_summary=_truncate(summary),
-            result=outcome,
-            run_id=run_id,
-        )
+            outcome = "ok" if exit_code == 0 else "error"
+            summary = (
+                f"command={command_str}\n"
+                f"exit_code={exit_code}\n"
+                f"worktree={worktree_path}\n"
+                f"--- stdout ---\n{_truncate(stdout)}\n"
+                f"--- stderr ---\n{_truncate(stderr)}"
+            )
+            await record_action(
+                db,
+                action="skill_execution",
+                target=str(skill.id),
+                payload_summary=_truncate(summary),
+                result=outcome,
+                run_id=run_id,
+            )
 
-        return {
-            "skill_id": skill.id,
-            "run_id": run_id,
-            "exit_code": exit_code,
-            "stdout": stdout,
-            "stderr": stderr,
-            "diff": diff,
-            "worktree_path": str(worktree_path),
-        }
-    finally:
-        await _remove_worktree(worktree_path, branch)
+            span.update(
+                output={"exit_code": exit_code, "diff_bytes": len(diff)},
+                level="DEFAULT" if exit_code == 0 else "ERROR",
+            )
+            return {
+                "skill_id": skill.id,
+                "run_id": run_id,
+                "exit_code": exit_code,
+                "stdout": stdout,
+                "stderr": stderr,
+                "diff": diff,
+                "worktree_path": str(worktree_path),
+            }
+        finally:
+            await _remove_worktree(worktree_path, branch)
 
 
 def build_pi_docker_run_argv(
@@ -502,6 +517,31 @@ def build_pi_docker_run_argv(
     return argv
 
 
+def build_pi_models_json(base_url: str, model_id: str, api_key: str = "lm-studio") -> str:
+    """Render pi's `models.json` provider config for one Agent Mode run.
+
+    `base_url` is either LM Studio directly or the LiteLLM proxy
+    (settings.agent_mode_llm_proxy_url) — the proxy speaks the same
+    OpenAI-compatible dialect and logs every request to Langfuse, which is the
+    only way pi's LLM traffic becomes observable (it originates inside the
+    sandbox container, invisible to the backend). The `api_key` parameter
+    exists for a future per-run LiteLLM virtual key carrying run_id metadata.
+    """
+    return json.dumps(
+        {
+            "providers": {
+                "lm-studio": {
+                    "baseUrl": base_url,
+                    "api": "openai-completions",
+                    "apiKey": api_key,
+                    "models": [{"id": model_id}],
+                }
+            }
+        },
+        indent=4,
+    )
+
+
 async def run_agent_mode_task(
     db: AsyncSession,
     task_description: str,
@@ -522,23 +562,52 @@ async def run_agent_mode_task(
     """
     run_id = run_id or f"agent-mode-{uuid.uuid4().hex[:8]}"
 
-    violation = check_deny_list(task_description)
-    if violation:
-        await record_seven_action(
-            db,
-            action="agent_mode_run",
-            target=run_id,
-            payload_summary=f"denied — matched deny-list rule '{violation}': {_truncate(task_description, 500)}",
-            result="denied",
-            run_id=run_id,
+    # LiteLLM proxy interception: when configured, pi talks to the proxy
+    # instead of LM Studio directly, and every LLM request from inside the
+    # sandbox lands in Langfuse. Empty setting = today's direct path.
+    effective_base_url = settings.agent_mode_llm_proxy_url or llm_base_url
+
+    with tracing.trace_span(
+        "agent-mode-run",
+        persona="seven",
+        session_id=run_id,
+        tags=["agent-mode"],
+        input=task_description,
+        metadata={"model": model_id, "llm_base_url": effective_base_url},
+    ) as span:
+        violation = check_deny_list(task_description)
+        if violation:
+            await record_seven_action(
+                db,
+                action="agent_mode_run",
+                target=run_id,
+                payload_summary=f"denied — matched deny-list rule '{violation}': {_truncate(task_description, 500)}",
+                result="denied",
+                run_id=run_id,
+            )
+            span.update(level="ERROR", status_message=f"deny-list rule '{violation}'")
+            raise SkillExecutionDenied(f"Task violates deny-list rule '{violation}'")
+
+        agent_logger.info(f"[run] Starting agent run {run_id}")
+        agent_logger.info(f"[run] task={_truncate(task_description, 500)}")
+        agent_logger.info(f"[run] llm_base_url={effective_base_url}")
+        agent_logger.info(f"[run] model={model_id}")
+
+        return await _run_agent_mode_task_traced(
+            db, span, run_id, task_description, effective_base_url, model_id
         )
-        raise SkillExecutionDenied(f"Task violates deny-list rule '{violation}'")
 
-    agent_logger.info(f"[run] Starting agent run {run_id}")
-    agent_logger.info(f"[run] task={_truncate(task_description, 500)}")
-    agent_logger.info(f"[run] llm_base_url={llm_base_url}")
-    agent_logger.info(f"[run] model={model_id}")
 
+async def _run_agent_mode_task_traced(
+    db: AsyncSession,
+    span,
+    run_id: str,
+    task_description: str,
+    llm_base_url: str,
+    model_id: str,
+) -> dict:
+    """Body of run_agent_mode_task after the deny-list gate — split out so the
+    tracing span wraps it without re-indenting the whole pipeline."""
     clone_path, branch = await _clone_seven_repo(run_id, settings.seven_gitlab_workspace_repo)
     try:
         agent_logger.info(f"[run] Clone ready at {clone_path}, branch {branch}")
@@ -558,22 +627,7 @@ async def run_agent_mode_task(
         pi_home = SANDBOX_BASE_DIR / f"{run_id}.pi-home"
         models_json = pi_home / ".pi" / "agent" / "models.json"
         models_json.parent.mkdir(parents=True, exist_ok=True)
-        models_json.write_text(
-            f"""{{
-    "providers": {{
-        "lm-studio": {{
-            "baseUrl": "{llm_base_url}",
-            "api": "openai-completions",
-            "apiKey": "lm-studio",
-            "models": [
-                {{
-                    "id": "{model_id}"
-                }}
-            ]
-        }}
-    }}
-}}"""
-        )
+        models_json.write_text(build_pi_models_json(llm_base_url, model_id))
         agent_logger.info(f"[run] Wrote models.json to {models_json}")
         exit_code, _, chmod_stderr = await _run_subprocess(["chmod", "-R", "a+rwX", str(pi_home)])
         if exit_code != 0:
@@ -648,6 +702,17 @@ async def run_agent_mode_task(
             run_id=run_id,
         )
 
+        span.update(
+            output={
+                "exit_code": exit_code,
+                "diff_bytes": len(diff),
+                "pushed": pushed,
+                "branch": branch,
+                "compare_url": compare_url,
+                "push_note": push_note,
+            },
+            level="DEFAULT" if exit_code == 0 else "ERROR",
+        )
         return {
             "run_id": run_id,
             "exit_code": exit_code,

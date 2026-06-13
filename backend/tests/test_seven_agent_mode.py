@@ -144,6 +144,44 @@ def test_build_pi_docker_run_argv_uses_lmstudio_network_and_passes_llm_config(tm
     assert "qwen-test" in argv
 
 
+# --- build_pi_models_json ---
+
+
+def test_build_pi_models_json_renders_provider_config():
+    import json
+
+    config = json.loads(
+        sandbox_service.build_pi_models_json("http://lm8000:1234/v1", "qwen-test")
+    )
+    provider = config["providers"]["lm-studio"]
+    assert provider["baseUrl"] == "http://lm8000:1234/v1"
+    assert provider["api"] == "openai-completions"
+    assert provider["apiKey"] == "lm-studio"
+    assert provider["models"] == [{"id": "qwen-test"}]
+
+
+async def test_run_agent_mode_task_prefers_litellm_proxy_when_configured(monkeypatch):
+    """With agent_mode_llm_proxy_url set, pi's models.json must point at the
+    proxy instead of LM Studio — that's the whole observability interception."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "agent_mode_llm_proxy_url", "http://litellm:4000/v1")
+
+    captured: dict = {}
+
+    async def _fake_traced(db, span, run_id, task_description, llm_base_url, model_id):
+        captured["llm_base_url"] = llm_base_url
+        return {"run_id": run_id, "exit_code": 0}
+
+    monkeypatch.setattr(sandbox_service, "_run_agent_mode_task_traced", _fake_traced)
+
+    result = await sandbox_service.run_agent_mode_task(
+        None, "harmless task", llm_base_url="http://lm8000:1234/v1", model_id="qwen-test"
+    )
+    assert captured["llm_base_url"] == "http://litellm:4000/v1"
+    assert result["exit_code"] == 0
+
+
 # --- run_agent_mode_task: deny-list rejection (no container should ever run) ---
 
 

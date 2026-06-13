@@ -21,10 +21,17 @@ services:
       - DISCORD_BOT_LOCUTUS_LLM_MODEL_ID=${DISCORD_BOT_LOCUTUS_LLM_MODEL_ID:-google/gemma-4-e4b}
       - DISCORD_BOT_SEVEN_LLM_BASE_URL=${DISCORD_BOT_SEVEN_LLM_BASE_URL:-http://lm8000:1234/v1}
       - DISCORD_BOT_SEVEN_LLM_MODEL_ID=${DISCORD_BOT_SEVEN_LLM_MODEL_ID:-qwen/qwen3.6-35b-a3b-mtp}
+      # Langfuse tracing (optional — see observability/). Keys live in
+      # backend/.env; the host default targets the langfuse-web container on
+      # the external observability network.
+      - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse-web:3000}
+      # LiteLLM proxy for Agent Mode pi runs (empty = direct to LM Studio)
+      - AGENT_MODE_LLM_PROXY_URL=${AGENT_MODE_LLM_PROXY_URL:-}
     networks:
       - default
       - lmstudio
       - gitlab
+      - observability
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -49,6 +56,28 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+  # OpenAI-compatible passthrough to the LM Studio hosts with Langfuse
+  # logging — Agent Mode's pi sandbox containers point at it (see
+  # observability/litellm-config.yaml and agent_sandbox/service.py). Joins the
+  # lmstudio network because the sandboxes run there (`--network
+  # lmstudio-docker_default`), and the observability network so the Langfuse
+  # callback can reach langfuse-web. No master_key: auth stays open on these
+  # isolated bridge networks, so pi's static "lm-studio" apiKey keeps working.
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: borgos-litellm
+    command: ["--config", "/etc/litellm/config.yaml", "--port", "4000"]
+    volumes:
+      - ./observability/litellm-config.yaml:/etc/litellm/config.yaml:ro
+    environment:
+      - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse-web:3000}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
+    networks:
+      - lmstudio
+      - observability
+    restart: unless-stopped
 
   frontend:
     build:
@@ -79,3 +108,9 @@ networks:
   gitlab:
     external: true
     name: gilab-docker_default
+  # Langfuse stack — separate compose project under observability/ (same
+  # external-network pattern as gitlab and lmstudio). Bring it up first:
+  # `docker compose -f observability/docker-compose.yml up -d`.
+  observability:
+    external: true
+    name: observability_default

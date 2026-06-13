@@ -40,6 +40,7 @@ from app.locutus import service as locutus_service
 from app.seven_of_nine.router import router as seven_of_nine_router
 from app.seven_of_nine import service as seven_of_nine_service
 from app.agent_sandbox.router import router as agent_sandbox_router
+from app.observability.router import router as observability_router
 from app.discord_bot.config import BotConfig
 from app.discord_bot.service import DiscordBotService, PERSONA_LOCUTUS, PERSONA_SEVEN
 from app.discord_bot.listener import TaskEventListener
@@ -360,6 +361,10 @@ async def lifespan(app: FastAPI):
     # Shutdown Discord Bot
     await _shutdown_discord_bot()
 
+    # Flush buffered Langfuse traces (no-op when tracing is disabled)
+    from app.shared import tracing
+    tracing.shutdown()
+
 
 app = FastAPI(
     title="BorgOS API",
@@ -397,6 +402,7 @@ app.include_router(discord_locutus_router)
 app.include_router(locutus_router)
 app.include_router(seven_of_nine_router)
 app.include_router(agent_sandbox_router)
+app.include_router(observability_router)
 
 
 @app.get("/api/health")

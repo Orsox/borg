@@ -24,6 +24,7 @@ from app.second_brain.models import Note
 from app.second_brain import action_service
 from app.second_brain.service import create_note as _create_note
 from app.second_brain.action_models import ActionMemory
+from app.shared import tracing
 
 logger = logging.getLogger(__name__)
 
@@ -248,127 +249,144 @@ async def run_dreaming_cycle(
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
 
-    try:
-        # Light phase: fetch recent actions (paginate to handle >1000 entries)
-        all_actions: list[ActionMemory] = []
-        page = 1
-        while True:
-            result = await action_service.list_action_memories(db, page=page, size=100)
-            all_actions.extend(result["items"])
-            if page >= result["pages"]:
-                break
-            page += 1
-        recent_actions = _filter_recent_actions(all_actions, days)
+    with tracing.trace_span(
+        "dreaming-cycle",
+        persona=persona or "locutus",
+        session_id=f"dreaming-{run.id}",
+        tags=["dreaming"],
+        metadata={"days": days, "min_actions": min_actions},
+    ) as span:
+        try:
+            # Light phase: fetch recent actions (paginate to handle >1000 entries)
+            all_actions: list[ActionMemory] = []
+            page = 1
+            while True:
+                result = await action_service.list_action_memories(db, page=page, size=100)
+                all_actions.extend(result["items"])
+                if page >= result["pages"]:
+                    break
+                page += 1
+            recent_actions = _filter_recent_actions(all_actions, days)
 
-        run.action_memories_analyzed = len(recent_actions)
+            run.action_memories_analyzed = len(recent_actions)
 
-        if len(recent_actions) < min_actions:
+            if len(recent_actions) < min_actions:
+                run.status = "success"
+                run.finished_at = datetime.now(timezone.utc)
+                run.summary = f"Only {len(recent_actions)} actions in last {days} days — skipping (minimum: {min_actions})"
+                await sse_queue.put({
+                    "type": "dreaming_run_completed",
+                    "run_id": run.id,
+                    "status": run.status,
+                    "reason": run.summary,
+                    "persona": persona,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+                await db.commit()
+                span.update(output={"status": "skipped", "reason": run.summary})
+                return {"status": "skipped", "reason": run.summary, "run_id": run.id}
+
+            # REM phase: extract patterns
+            patterns = _extract_patterns(recent_actions)
+            run.patterns_found = (
+                len(patterns.get("frequent_tags", []))
+                + len(patterns.get("recurring_errors", []))
+            )
+
+            # Deep phase: create dream note
+            note = await _create_dream_note(db, patterns, run, persona=persona)
+            run.notes_created = 1 if note else 0
+
             run.status = "success"
             run.finished_at = datetime.now(timezone.utc)
-            run.summary = f"Only {len(recent_actions)} actions in last {days} days — skipping (minimum: {min_actions})"
+            run.summary = f"Dream diary created: {note.title if note else 'none'}"
             await sse_queue.put({
                 "type": "dreaming_run_completed",
                 "run_id": run.id,
                 "status": run.status,
-                "reason": run.summary,
+                "notes_created": run.notes_created,
+                "note_title": note.title if note else None,
                 "persona": persona,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
             await db.commit()
-            return {"status": "skipped", "reason": run.summary, "run_id": run.id}
 
-        # REM phase: extract patterns
-        patterns = _extract_patterns(recent_actions)
-        run.patterns_found = (
-            len(patterns.get("frequent_tags", []))
-            + len(patterns.get("recurring_errors", []))
-        )
+            # Final step: turn recurring failure patterns into draft proposals for review.
+            # Never lets gap analysis failures sour an otherwise-successful dreaming run.
+            new_proposals: list[dict[str, Any]] = []
+            try:
+                from app.locutus.gap_analysis import run_gap_analysis
 
-        # Deep phase: create dream note
-        note = await _create_dream_note(db, patterns, run, persona=persona)
-        run.notes_created = 1 if note else 0
+                new_logs = await run_gap_analysis(db, recent_actions, run_id=f"dreaming-{run.id}")
+                new_proposals = [
+                    {"id": log.id, "title": log.title, "trigger_description": log.trigger_description}
+                    for log in new_logs
+                ]
+                if new_proposals:
+                    await sse_queue.put({
+                        "type": "gap_analysis_completed",
+                        "run_id": run.id,
+                        "proposals": new_proposals,
+                        "persona": persona,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+            except Exception:
+                logger.exception(f"Gap analysis failed for dreaming run #{run.id}")
 
-        run.status = "success"
-        run.finished_at = datetime.now(timezone.utc)
-        run.summary = f"Dream diary created: {note.title if note else 'none'}"
-        await sse_queue.put({
-            "type": "dreaming_run_completed",
-            "run_id": run.id,
-            "status": run.status,
-            "notes_created": run.notes_created,
-            "note_title": note.title if note else None,
-            "persona": persona,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
-        await db.commit()
+            # Refresh improvement insights from the same failure window and announce
+            # new findings. Insight failures never sour a successful dreaming run.
+            insight_result: dict[str, Any] = {}
+            try:
+                from app.second_brain.insight_service import generate_insights
 
-        # Final step: turn recurring failure patterns into draft proposals for review.
-        # Never lets gap analysis failures sour an otherwise-successful dreaming run.
-        new_proposals: list[dict[str, Any]] = []
-        try:
-            from app.locutus.gap_analysis import run_gap_analysis
+                with tracing.trace_span("generate-insights", tags=["dreaming"]):
+                    insight_result = await generate_insights(db, days=days)
+                if insight_result["created"] or insight_result["updated"]:
+                    await sse_queue.put({
+                        "type": "insights_digest",
+                        "run_id": run.id,
+                        "created": insight_result["created"],
+                        "updated": insight_result["updated"],
+                        "total_open": insight_result["total_open"],
+                        "top": insight_result["top"][:5],
+                        "persona": persona,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+            except Exception:
+                logger.exception(f"Insight generation failed for dreaming run #{run.id}")
 
-            new_logs = await run_gap_analysis(db, recent_actions, run_id=f"dreaming-{run.id}")
-            new_proposals = [
-                {"id": log.id, "title": log.title, "trigger_description": log.trigger_description}
-                for log in new_logs
-            ]
-            if new_proposals:
-                await sse_queue.put({
-                    "type": "gap_analysis_completed",
-                    "run_id": run.id,
-                    "proposals": new_proposals,
-                    "persona": persona,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
-        except Exception:
-            logger.exception(f"Gap analysis failed for dreaming run #{run.id}")
+            span.update(output={
+                "status": "success",
+                "actions_analyzed": run.action_memories_analyzed,
+                "patterns_found": run.patterns_found,
+                "notes_created": run.notes_created,
+                "gap_proposals": len(new_proposals),
+            })
+            return {
+                "status": "success",
+                "run_id": run.id,
+                "actions_analyzed": run.action_memories_analyzed,
+                "patterns_found": run.patterns_found,
+                "notes_created": run.notes_created,
+                "note_title": note.title if note else None,
+                "gap_proposals": new_proposals,
+            }
 
-        # Refresh improvement insights from the same failure window and announce
-        # new findings. Insight failures never sour a successful dreaming run.
-        insight_result: dict[str, Any] = {}
-        try:
-            from app.second_brain.insight_service import generate_insights
-
-            insight_result = await generate_insights(db, days=days)
-            if insight_result["created"] or insight_result["updated"]:
-                await sse_queue.put({
-                    "type": "insights_digest",
-                    "run_id": run.id,
-                    "created": insight_result["created"],
-                    "updated": insight_result["updated"],
-                    "total_open": insight_result["total_open"],
-                    "top": insight_result["top"][:5],
-                    "persona": persona,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
-        except Exception:
-            logger.exception(f"Insight generation failed for dreaming run #{run.id}")
-
-        return {
-            "status": "success",
-            "run_id": run.id,
-            "actions_analyzed": run.action_memories_analyzed,
-            "patterns_found": run.patterns_found,
-            "notes_created": run.notes_created,
-            "note_title": note.title if note else None,
-            "gap_proposals": new_proposals,
-        }
-
-    except Exception as e:
-        run.status = "failed"
-        run.finished_at = datetime.now(timezone.utc)
-        run.error = str(e)
-        await sse_queue.put({
-            "type": "dreaming_run_completed",
-            "run_id": run.id,
-            "status": run.status,
-            "error": str(e),
-            "persona": persona,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
-        await db.commit()
-        raise
+        except Exception as e:
+            run.status = "failed"
+            run.finished_at = datetime.now(timezone.utc)
+            run.error = str(e)
+            await sse_queue.put({
+                "type": "dreaming_run_completed",
+                "run_id": run.id,
+                "status": run.status,
+                "error": str(e),
+                "persona": persona,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            await db.commit()
+            span.update(level="ERROR", status_message=str(e))
+            raise
 
 
 async def get_dreaming_runs(

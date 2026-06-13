@@ -1,0 +1,168 @@
+# Langfuse v3 self-hosted stack — separate compose project, joined to borg via
+# the external `observability_default` network (same pattern as the GitLab and
+# LM Studio projects). Based on the upstream langfuse/langfuse docker-compose:
+# https://github.com/langfuse/langfuse/blob/main/docker-compose.yml
+#
+# Usage:
+#   cp example.env .env    # fill in secrets
+#   docker compose up -d   # from this directory (project name: observability)
+#
+# UI: http://localhost:3052 — log in with LANGFUSE_INIT_USER_EMAIL/_PASSWORD.
+# Headless init (LANGFUSE_INIT_*) creates the org/project/API keys on first
+# boot, so backend/.env and litellm can reference the keys without a manual
+# UI step.
+
+services:
+  langfuse-web:
+    image: docker.io/langfuse/langfuse:3
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    ports:
+      - "3052:3000"
+    environment: &langfuse-env
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/langfuse
+      SALT: ${SALT}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY} # generate via `openssl rand -hex 32`
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3052}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: "events/"
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: "media/"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${REDIS_AUTH}
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+      # Headless init — deterministic org/project/keys on first boot
+      LANGFUSE_INIT_ORG_ID: borg
+      LANGFUSE_INIT_ORG_NAME: Borg
+      LANGFUSE_INIT_PROJECT_ID: borg
+      LANGFUSE_INIT_PROJECT_NAME: borg
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-Orsox}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD}
+
+  langfuse-worker:
+    image: docker.io/langfuse/langfuse-worker:3
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment: *langfuse-env
+
+  postgres:
+    image: docker.io/postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: langfuse
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - langfuse-postgres:/var/lib/postgresql/data
+
+  clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:24.12
+    restart: unless-stopped
+    user: "101:101"
+    # Biggest memory consumer of the stack — capped for the shared homelab
+    # box; queries get slower instead of ClickHouse eating the machine.
+    mem_limit: 4g
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 1m
+    volumes:
+      - langfuse-clickhouse-data:/var/lib/clickhouse
+      - langfuse-clickhouse-logs:/var/log/clickhouse-server
+
+  redis:
+    image: docker.io/redis:7
+    restart: unless-stopped
+    command: >
+      --requirepass ${REDIS_AUTH}
+      --maxmemory-policy noeviction
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_AUTH ping | grep PONG"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+    environment:
+      REDIS_AUTH: ${REDIS_AUTH}
+    volumes:
+      - langfuse-redis:/data
+
+  minio:
+    image: docker.io/minio/minio:latest
+    restart: unless-stopped
+    entrypoint: sh
+    # Create the `langfuse` bucket before starting the server (upstream pattern)
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 1s
+    volumes:
+      - langfuse-minio:/data
+
+volumes:
+  langfuse-postgres:
+  langfuse-clickhouse-data:
+  langfuse-clickhouse-logs:
+  langfuse-redis:
+  langfuse-minio:
+
+networks:
+  # Pre-created shared network (`docker network create observability_default`,
+  # see Makefile) — borg's backend and litellm join it as external, so it must
+  # outlive both compose projects rather than belong to either of them.
+  default:
+    external: true
+    name: observability_default
