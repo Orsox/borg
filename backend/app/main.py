@@ -28,6 +28,7 @@ from app.second_brain import action_service as action_memory_service
 from app.task_automation.models import Task, TaskRun  # noqa: F401
 from app.locutus.models import CharacterProfile, CharacterMemoryEntry, ReasoningLog, EvolutionBudget, SkillRecord  # noqa: F401
 from app.seven_of_nine.models import DroneProfile, DroneMemoryEntry, DroneAuditEntry  # noqa: F401
+from app.peer_sync.models import PeerInstance, SyncRun, SyncItemRecord  # noqa: F401
 from app.task_automation.router import router as task_router
 from app.task_automation.scheduler import init_scheduler, shutdown_scheduler, reload_all_tasks
 from app.skills.router import router as skills_router
@@ -41,6 +42,8 @@ from app.seven_of_nine.router import router as seven_of_nine_router
 from app.seven_of_nine import service as seven_of_nine_service
 from app.agent_sandbox.router import router as agent_sandbox_router
 from app.observability.router import router as observability_router
+from app.peer_sync.router import router as peer_sync_router
+from app.peer_sync.peer_router import router as peer_router
 from app.discord_bot.config import BotConfig
 from app.discord_bot.service import DiscordBotService, PERSONA_LOCUTUS, PERSONA_SEVEN
 from app.discord_bot.listener import TaskEventListener
@@ -277,6 +280,12 @@ async def lifespan(app: FastAPI):
         await action_memory_service.seed_default_actions(db)
         await locutus_service.seed_default_data(db)
         await seven_of_nine_service.seed_default_data(db)
+        # Register Seven's peer-sync comparator skills (idempotent).
+        try:
+            from app.seven_of_nine.sync_agent import seed_sync_skills
+            await seed_sync_skills(db)
+        except Exception:
+            logger.exception("Failed to seed peer-sync skills")
         # Import failed Archon runs from .archon logs (idempotent).
         try:
             from app.second_brain.archon_ingest import ingest_archon_run_failures
@@ -403,6 +412,8 @@ app.include_router(locutus_router)
 app.include_router(seven_of_nine_router)
 app.include_router(agent_sandbox_router)
 app.include_router(observability_router)
+app.include_router(peer_sync_router)
+app.include_router(peer_router)
 
 
 @app.get("/api/health")

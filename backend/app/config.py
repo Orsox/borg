@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     archon_api_url: str = "http://localhost:3090"
     cors_origins: str = "http://localhost:5173"
 
+    # Peer Sync — bearer token that authorizes *this* instance's read-only
+    # /api/peer/manifest endpoint. Empty (default) ⇒ this instance refuses to act
+    # as a sync peer. Per-peer outbound tokens are stored on PeerInstance.token.
+    peer_sync_token: str = Field(default="", description="Bearer token for /api/peer/manifest (empty = peer mode disabled)")
+
     # Discord Bot Configuration — Locutus (primäre Persona, eigener Account)
     discord_bot_locutus_enabled: bool = Field(default=False, description="Locutus Bot aktivieren")
     discord_bot_locutus_token: str = Field(default="", description="Discord Bot Token für Locutus")

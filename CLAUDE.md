@@ -55,6 +55,7 @@ Each feature is a self-contained module with `models.py`, `schemas.py`, `service
 | `vault/` | `/api/vault` | Read-only scanner for the Obsidian vault at `~/Memory/` |
 | `task_automation/` | `/api/tasks` | APScheduler cron tasks — shell commands or Archon workflow triggers |
 | `observability/` | `/api/observability` | Server-side proxy to the Langfuse public API (status, traces, trace detail) — secret key never reaches the browser |
+| `peer_sync/` | `/api/peer-sync` + `/api/peer` | Sync Archon workflows/skills/agents + the Skill DB module from another BorgOS instance: static diff → Seven's comparator → manual per-item apply |
 
 **Startup sequence** (`main.py` lifespan): create tables → seed default user → seed action memories → ingest Archon run failures → start APScheduler.
 
@@ -88,6 +89,17 @@ Optional, **off by default** — the app must behave identically without it (tes
 - Agent Mode interception: pi inside the sandbox talks to LM Studio directly, so its calls are invisible to the backend. When `AGENT_MODE_LLM_PROXY_URL` is set (e.g. `http://litellm:4000/v1`), pi's generated `models.json` points at the `litellm` proxy service (config: `observability/litellm-config.yaml`), which logs every request to Langfuse. Empty = direct to LM Studio, today's behavior.
 - Privacy note: traces contain full prompts/outputs, including recalled memories in system prompts — local-only by design.
 - Borg-themed trace browser at `/observability` in the frontend (`routes/observability/`, client `lib/api/observability.ts`): filter by surface tag/persona, trace detail with observation tree, deep links into the Langfuse UI via `LANGFUSE_UI_URL`. Shows a setup hint when unconfigured.
+
+### Peer Sync
+
+`peer_sync/` lets any BorgOS instance act as a **client** that pulls from another local BorgOS and synchronizes Archon **workflows/skills/agents** (scanned `ArchonAsset`s) plus the **Skill DB module**.
+
+- **Topology:** pull + review. The remote exposes one read-only, token-gated endpoint `GET /api/peer/manifest` (auth via `PEER_SYNC_TOKEN` bearer — *not* JWT, since the caller has no user session; empty token ⇒ peer mode disabled). The local instance pulls it; nothing is written remotely.
+- **One normalized shape** `SyncableItem(kind, identity, content, content_hash)` unifies all four scopes (`manifest.py`). Asset `identity` = POSIX path relative to `ARCHON_PATH`; `skill_db` `identity` = skill name, `content` = canonical metadata JSON (so apply can faithfully recreate via `skills.service`).
+- **Static diff** (`diff.py`, pure) classifies each `(kind, identity)` as only_remote / only_local / changed / identical by `sha256`.
+- **Seven's comparator** (`seven_of_nine/sync_agent.py::SyncComparatorDrone`) analyses *changed* items via a direct Seven LLM call (no pi/Docker) with three skills — `semantic_compare`, `merge_recommendation`, `risk_assessment` — seeded as visible `Skill` DB rows (`category sync-comparison`). Every compare/apply writes a `DroneAuditEntry`.
+- **Apply** is manual per item: accepting writes the remote version to the local `ARCHON_PATH` (+ re-scan) or upserts the `Skill` via `skills.service`. Per-peer outbound tokens live on `PeerInstance.token`; this instance's own offered token is `PEER_SYNC_TOKEN`.
+- Borg-themed review UI at `/sync` (`routes/sync/`, client `lib/api/peerSync.ts`): register peers, run the diff, trigger Seven's comparison, accept/reject each item with a side-by-side content view.
 
 ### Vault integration
 
