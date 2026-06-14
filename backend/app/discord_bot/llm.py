@@ -50,7 +50,7 @@ class LlmClient:
         """Initialisiere HTTP-Client."""
         self._client = httpx.AsyncClient(
             base_url=self._config.base_url,
-            timeout=httpx.Timeout(30.0, connect=5.0),
+            timeout=httpx.Timeout(600.0, connect=5.0),
         )
         logger.info(f"LlmClient initialized: model={self._config.model_id}")
 
@@ -123,7 +123,7 @@ class LlmClient:
             except (httpx.ReadTimeout, httpx.ConnectTimeout) as e:
                 logger.error(f"LM Studio timeout: {e}")
                 gen.update(level="ERROR", status_message="timeout")
-                raise LlmError("LM Studio timeout after 30s")
+                raise LlmError("LM Studio timeout after 600s")
             except LlmError as e:
                 gen.update(level="ERROR", status_message=str(e))
                 raise
