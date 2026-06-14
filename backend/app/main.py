@@ -29,6 +29,7 @@ from app.task_automation.models import Task, TaskRun  # noqa: F401
 from app.locutus.models import CharacterProfile, CharacterMemoryEntry, ReasoningLog, EvolutionBudget, SkillRecord  # noqa: F401
 from app.seven_of_nine.models import DroneProfile, DroneMemoryEntry, DroneAuditEntry  # noqa: F401
 from app.peer_sync.models import PeerInstance, SyncRun, SyncItemRecord  # noqa: F401
+from app.personas.models import Persona  # noqa: F401
 from app.task_automation.router import router as task_router
 from app.task_automation.scheduler import init_scheduler, shutdown_scheduler, reload_all_tasks
 from app.skills.router import router as skills_router
@@ -44,10 +45,11 @@ from app.agent_sandbox.router import router as agent_sandbox_router
 from app.observability.router import router as observability_router
 from app.peer_sync.router import router as peer_sync_router
 from app.peer_sync.peer_router import router as peer_router
-from app.discord_bot.config import BotConfig
+from app.discord_bot.config import BotConfig, LlmConfig
 from app.discord_bot.service import DiscordBotService, PERSONA_LOCUTUS, PERSONA_SEVEN
 from app.meeting.orchestrator import MeetingService
 from app.meeting.router import router as meeting_router, set_meeting_service
+from app.personas.router import router as personas_router
 from app.discord_bot.listener import TaskEventListener
 from app.discord_bot.bot import BotClient
 from app.database import Base, AsyncSessionLocal, engine
@@ -108,17 +110,84 @@ async def _connect_persona_bot(
     return task
 
 
+def _build_bot_config_from_personas(locutus_persona, seven_persona) -> BotConfig:
+    """Build a shared BotConfig from DB persona rows (has both LLM configs)."""
+    return BotConfig(
+        env_prefix="DISCORD_BOT_LOCUTUS",
+        enabled=locutus_persona.discord_enabled,
+        token=locutus_persona.discord_token or "",
+        channel_id=locutus_persona.discord_channel_id,
+        allowed_user_ids=(
+            [int(u.strip()) for u in locutus_persona.discord_allowed_user_ids.split(",") if u.strip()]
+            if locutus_persona.discord_allowed_user_ids else None
+        ),
+        prefix=locutus_persona.discord_prefix,
+        mention_prefix=locutus_persona.discord_mention_prefix or "",
+        llm=LlmConfig(
+            persona="locutus",
+            base_url=locutus_persona.llm_base_url,
+            model_id=locutus_persona.llm_model_id,
+            context_window=locutus_persona.llm_context_window,
+            max_tokens=locutus_persona.llm_max_tokens,
+            temperature=float(locutus_persona.llm_temperature),
+        ),
+        seven_llm=LlmConfig(
+            persona="seven",
+            base_url=seven_persona.llm_base_url,
+            model_id=seven_persona.llm_model_id,
+            context_window=seven_persona.llm_context_window,
+            max_tokens=seven_persona.llm_max_tokens,
+            temperature=float(seven_persona.llm_temperature),
+        ),
+    )
+
+
+def _build_seven_bot_config(seven_persona) -> BotConfig:
+    """Build Seven's standalone BotConfig from DB persona row."""
+    return BotConfig(
+        env_prefix="DISCORD_BOT_SEVEN",
+        enabled=seven_persona.discord_enabled,
+        token=seven_persona.discord_token or "",
+        channel_id=seven_persona.discord_channel_id,
+        allowed_user_ids=(
+            [int(u.strip()) for u in seven_persona.discord_allowed_user_ids.split(",") if u.strip()]
+            if seven_persona.discord_allowed_user_ids else None
+        ),
+        prefix=seven_persona.discord_prefix,
+        mention_prefix=seven_persona.discord_mention_prefix or "",
+        llm=LlmConfig(
+            persona="seven",
+            base_url=seven_persona.llm_base_url,
+            model_id=seven_persona.llm_model_id,
+            context_window=seven_persona.llm_context_window,
+            max_tokens=seven_persona.llm_max_tokens,
+            temperature=float(seven_persona.llm_temperature),
+        ),
+    )
+
+
 async def _init_discord_bot() -> None:
     """Initialisiere Locutus + Seven of Nine Discord-Bots — eigene Accounts, geteilter Service.
 
-    Beide Personas haben ihren eigenen ``..._ENABLED``-Schalter und ihr eigenes
-    Discord-Bot-Token, sind also unabhängig voneinander aktivierbar. Sie teilen
-    sich aber einen ``DiscordBotService`` (LLM-Clients, Memory, Audit, Notes-Zugriff).
+    Both personas have their own ``discord_enabled`` flag and bot token stored in
+    the personas DB table. They share a ``DiscordBotService`` (LLM-Clients,
+    Memory, Audit, Notes-Zugriff).
     """
     global _bot_service, _sse_listener, _bot_client, _bot_task, _seven_bot_client, _seven_bot_task
 
-    locutus_config = BotConfig.from_env_locutus()
-    seven_config = BotConfig.from_env_seven()
+    # Load persona configs from DB — falls back to .env if table is empty.
+    async with AsyncSessionLocal() as db:
+        locutus_persona = await app.personas.service.get_persona_by_key(db, "locutus")  # type: ignore[attr-defined]
+        seven_persona = await app.personas.service.get_persona_by_key(db, "seven")  # type: ignore[attr-defined]
+
+    if locutus_persona is not None and seven_persona is not None:
+        locutus_config = _build_bot_config_from_personas(locutus_persona, seven_persona)
+        seven_config = _build_seven_bot_config(seven_persona)
+    else:
+        # Fallback to .env (should only happen before seed runs)
+        logger.warning("No personas found in DB — falling back to .env config for Discord bots")
+        locutus_config = BotConfig.from_env_locutus()
+        seven_config = BotConfig.from_env_seven()
 
     if not locutus_config.enabled and not seven_config.enabled:
         logger.info(
@@ -283,6 +352,14 @@ async def lifespan(app: FastAPI):
         await action_memory_service.seed_default_actions(db)
         await locutus_service.seed_default_data(db)
         await seven_of_nine_service.seed_default_data(db)
+        # Seed default personas from .env when the table is empty.
+        try:
+            from app.personas import service as persona_service
+            seeded = await persona_service.seed_default_personas(db)
+            if seeded > 0:
+                logger.info(f"Seeded {seeded} default personas (Locutus, Seven of Nine)")
+        except Exception:
+            logger.exception("Failed to seed default personas")
         # Register Seven's peer-sync comparator skills (idempotent).
         try:
             from app.seven_of_nine.sync_agent import seed_sync_skills
@@ -369,7 +446,7 @@ async def lifespan(app: FastAPI):
     # Discord bots are enabled.
     global _meeting_service
     try:
-        _meeting_service = MeetingService(BotConfig.from_env_locutus())
+        _meeting_service = MeetingService()
         await _meeting_service.start()
         set_meeting_service(_meeting_service)
     except Exception:
@@ -432,6 +509,7 @@ app.include_router(observability_router)
 app.include_router(peer_sync_router)
 app.include_router(peer_router)
 app.include_router(meeting_router)
+app.include_router(personas_router)
 
 
 @app.get("/api/health")

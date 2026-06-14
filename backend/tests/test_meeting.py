@@ -5,11 +5,12 @@ touch Langfuse" rule).
 """
 
 import asyncio
+import logging
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.discord_bot.config import BotConfig
+from app.database import AsyncSessionLocal
 from app.discord_bot.llm import LlmClient
 from app.main import app
 from app.meeting import router as meeting_router
@@ -37,10 +38,19 @@ def stub_llm(monkeypatch):
     monkeypatch.setattr(LlmClient, "chat", _fake_chat)
 
 
+logger = logging.getLogger(__name__)
+
+
 async def _build_service() -> MeetingService:
-    service = MeetingService(BotConfig.from_env_locutus())
-    await service.start()
-    return service
+    # Seed persona rows so build_personas_from_db returns participants.
+    async with AsyncSessionLocal() as db:
+        from app.personas import service as persona_svc
+        count = await persona_svc.seed_default_personas(db)
+        if count == 0:
+            logger.info("Persona table already populated — skipping seed")
+    svc = MeetingService()
+    await svc.start()
+    return svc
 
 
 async def _await_done(service: MeetingService, session_id: str, timeout: float = 5.0) -> None:

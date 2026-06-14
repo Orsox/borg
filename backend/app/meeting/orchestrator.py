@@ -24,7 +24,7 @@ from app.discord_bot.llm import LlmClient, LlmError
 from app.discord_bot.service import _strip_directive_markers
 from app.shared import tracing
 
-from .personas import MeetingPersona, build_personas
+from .personas import MeetingPersona, build_personas_from_db
 
 logger = logging.getLogger(__name__)
 
@@ -111,13 +111,15 @@ def _render_transcript(session: MeetingSession, persona: MeetingPersona) -> str:
 class MeetingService:
     """Singleton service that owns the LLM clients and the session registry."""
 
-    def __init__(self, config: BotConfig) -> None:
-        self._personas: list[MeetingPersona] = build_personas(config)
+    def __init__(self) -> None:
+        self._personas: list[MeetingPersona] = []
         self._clients: dict[str, LlmClient] = {}
         self._sessions: dict[str, MeetingSession] = {}
 
     async def start(self) -> None:
-        """Spin up one LlmClient per persona (mirrors DiscordBotService.start)."""
+        """Load personas from DB and spin up one LlmClient per persona."""
+        async with AsyncSessionLocal() as db:
+            self._personas = await build_personas_from_db(db)
         for persona in self._personas:
             client = LlmClient(persona.llm_config)
             await client.start()
