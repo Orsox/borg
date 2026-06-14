@@ -29,8 +29,13 @@ cd frontend && npm run check
 
 ### Docker
 ```bash
-docker compose up     # backend on :1742, frontend on :1701
+docker compose up                      # backend on :1742, frontend on :1701
+docker compose up -d --build backend   # apply backend CODE changes
 ```
+
+> **Code lives inside the image** (no volume mount). After editing backend
+> source, use `docker compose up -d --build backend` — plain `restart` only
+> reboots the old image and your changes won't take effect.
 
 ### DB migrations (Alembic)
 ```bash
