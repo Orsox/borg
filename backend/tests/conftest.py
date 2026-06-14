@@ -12,6 +12,7 @@ from app.second_brain.models import Note, NoteLink  # noqa: F401
 from app.locutus.models import CharacterProfile, CharacterMemoryEntry, ReasoningLog, EvolutionBudget, SkillRecord, LocutusAuditEntry  # noqa: F401
 from app.seven_of_nine.models import DroneProfile, DroneMemoryEntry, DroneAuditEntry  # noqa: F401
 from app.peer_sync.models import PeerInstance, SyncRun, SyncItemRecord  # noqa: F401
+from app.personas.models import Persona  # noqa: F401
 from app.skills.models import Skill  # noqa: F401
 from app.archon_hub.models import ArchonAsset, CopyHistory  # noqa: F401
 

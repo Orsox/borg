@@ -218,6 +218,8 @@ __marimo__/
 
 # BorgOS specific
 borgos.db
+*.zip
+*tmp.db
 frontend/.svelte-kit/
 frontend/node_modules/
 frontend/build/
