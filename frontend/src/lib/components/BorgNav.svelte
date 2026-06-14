@@ -11,6 +11,7 @@
 		{ href: '/meeting', label: 'Conference', icon: '◇' },
 		{ href: '/observability', label: 'Observability', icon: '◎' },
 		{ href: '/sync', label: 'Peer Sync', icon: '⇄' },
+		{ href: '/personas', label: 'Personas', icon: '◎' },
 		{ href: '/settings', label: 'Settings', icon: '⚙' },
 	];
 
