@@ -176,9 +176,11 @@ async def _init_discord_bot() -> None:
     global _bot_service, _sse_listener, _bot_client, _bot_task, _seven_bot_client, _seven_bot_task
 
     # Load persona configs from DB — falls back to .env if table is empty.
+    from app.personas import service as persona_service
+
     async with AsyncSessionLocal() as db:
-        locutus_persona = await app.personas.service.get_persona_by_key(db, "locutus")  # type: ignore[attr-defined]
-        seven_persona = await app.personas.service.get_persona_by_key(db, "seven")  # type: ignore[attr-defined]
+        locutus_persona = await persona_service.get_persona_by_key(db, "locutus")
+        seven_persona = await persona_service.get_persona_by_key(db, "seven")
 
     if locutus_persona is not None and seven_persona is not None:
         locutus_config = _build_bot_config_from_personas(locutus_persona, seven_persona)
